@@ -1,0 +1,14 @@
+[tool.poetry]
+name = "funlab-sse"
+version = "0.1.0"
+description = "Sever-side Event plugin for funlab flask web application"
+authors = ["sunny <013.lin@gmail.com>"]
+readme = "README.md"
+packages = [{include = "funlab"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
