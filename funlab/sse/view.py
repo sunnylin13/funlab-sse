@@ -12,17 +12,17 @@ from sqlalchemy import and_, or_, select, update
 from flask_restx import Api, Resource, Namespace
 
 from funlab.flaskr.app import FunlabFlask
-from .models import EventEntity, EventPriority, EventType
+from .model import EventEntity  # , EventPriority, EventType
 
 class SSEView(ViewPlugin):
 
     def __init__(self, app:FunlabFlask):
         super().__init__(app)
         self.app.json.sort_keys = False  # prevent jsonify sort the key when transfer to html page
-        api:Api = Api(self.blueprint, doc='swagger', title='SSE Event API', version='1.0',
-                      description='These APIs is used in server side event publish.')
-        self.api_namespace = Namespace('api')
-        api.add_namespace(self.api_namespace)
+        # api:Api = Api(self.blueprint, doc='swagger', title='SSE Event API', version='1.0',
+        #               description='These APIs is used in server side event publish.')
+        # self.api_namespace = Namespace('api')
+        # api.add_namespace(self.api_namespace)
         self.register_routes()
 
     # @property
@@ -72,14 +72,15 @@ class SSEView(ViewPlugin):
             success = self.mark_event_as_read(event_id, current_user.id)
             return jsonify({'success': success})
 
-    def create_event(self, event_type:EventType, data:dict,
-                     priority:EventPriority=None, user_id=None,
+    def create_event(self, event_type:str, data:dict,
+                     # priority:EventPriority=None, 
+                     user_id=None,
                     is_global=True, expires_in_hours=24):
         expires_at = datetime.now(timezone.utc) + timedelta(hours=expires_in_hours)
 
         event = EventEntity(
             event_type=event_type,
-            priority=priority.value,
+            # priority=priority.value,
             data=data,
             user_id=user_id,
             is_global=is_global,
