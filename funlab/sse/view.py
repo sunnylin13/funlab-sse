@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import time
 
-from flask import (Response, flash, jsonify, redirect, render_template, request, stream_with_context,
+from flask import (Response, flash, g, jsonify, redirect, render_template, request, stream_with_context,
                    url_for, current_app)
 from flask_login import current_user, login_required
 from funlab.core.menu import Menu, MenuItem
@@ -12,23 +12,37 @@ from sqlalchemy import and_, or_, select, update
 from flask_restx import Api, Resource, Namespace
 
 from funlab.flaskr.app import FunlabFlask
-from .model import EventEntity  # , EventPriority, EventType
+from .model import ServerSideEvent, ServerSideEventEntity
+from .manager import ServerSideEventMgr
 
 class SSEView(ViewPlugin):
 
     def __init__(self, app:FunlabFlask):
         super().__init__(app)
-        self.app.json.sort_keys = False  # prevent jsonify sort the key when transfer to html page
-        # api:Api = Api(self.blueprint, doc='swagger', title='SSE Event API', version='1.0',
-        #               description='These APIs is used in server side event publish.')
-        # self.api_namespace = Namespace('api')
-        # api.add_namespace(self.api_namespace)
+
         self.register_routes()
 
     # @property
     # def entities_registry(self):
     #     """ FunlabFlask use to table creation by sqlalchemy in __init__ for application initiation """
     #     return entities_registry
+
+    def init_app(self, app: FunlabFlask):
+        super().__init__(app)
+        self.dbmgr = app.dbmgr
+        self.app.extensions['sse'] = self
+        self.app.teardown_appcontext(self.teardown)
+
+    def teardown(self, exception):
+        sse_mgr:ServerSideEventMgr = g.pop('sse_mgr', None)
+        if sse_mgr is not None:
+            sse_mgr.shutdown()
+
+    @property
+    def sse_mgr(self):
+        if 'sse_mgr' not in g:
+            g.sse_mgr = ServerSideEventMgr(self.dbmgr)
+        return g.sse_mgr
 
     def sse_stream(self, user_id):
         def event_stream():
@@ -73,7 +87,7 @@ class SSEView(ViewPlugin):
             return jsonify({'success': success})
 
     def create_event(self, event_type:str, data:dict,
-                     # priority:EventPriority=None, 
+                     # priority:EventPriority=None,
                      user_id=None,
                     is_global=True, expires_in_hours=24):
         expires_at = datetime.now(timezone.utc) + timedelta(hours=expires_in_hours)
