@@ -30,7 +30,7 @@ class SSEView(ViewPlugin):
     def init_app(self, app: FunlabFlask):
         super().__init__(app)
         self.dbmgr = app.dbmgr
-        self.app.extensions['sse'] = self
+        # self.app.extensions['sse'] = self
         self.app.teardown_appcontext(self.teardown)
 
     def teardown(self, exception):
@@ -48,7 +48,7 @@ class SSEView(ViewPlugin):
         def event_stream():
             while True:
                 time.sleep(1)
-                events: list[EventEntity] = self.get_user_events(user_id)
+                events: list[ServerSideEventEntity] = self.get_user_events(user_id)
                 for event in events:
                     yield f"event: {event.event_type}\ndata: {event.content}\n\n"
 
@@ -92,7 +92,7 @@ class SSEView(ViewPlugin):
                     is_global=True, expires_in_hours=24):
         expires_at = datetime.now(timezone.utc) + timedelta(hours=expires_in_hours)
 
-        event = EventEntity(
+        event = ServerSideEventEntity(
             event_type=event_type,
             # priority=priority.value,
             data=data,
@@ -107,21 +107,21 @@ class SSEView(ViewPlugin):
 
     def get_user_events(self, user_id,
                         event_type:EventType=None, priority: EventPriority=None, include_expired: bool=False):
-        stmt = select(EventEntity).where(or_(EventEntity.user_id == user_id, EventEntity.is_global == True))
+        stmt = select(ServerSideEventEntity).where(or_(ServerSideEventEntity.user_id == user_id, ServerSideEventEntity.is_global == True))
         if not include_expired:
-            stmt = stmt.where(or_(EventEntity.is_expired == False))
+            stmt = stmt.where(or_(ServerSideEventEntity.is_expired == False))
         if event_type:
-            stmt = stmt.where(EventEntity.event_type == event_type)
+            stmt = stmt.where(ServerSideEventEntity.event_type == event_type)
         if priority:
-            stmt = stmt.where(EventEntity.priority == priority.value)
-        stmt = stmt.order_by(EventEntity.priority.desc(), EventEntity.created_at.desc())
+            stmt = stmt.where(ServerSideEventEntity.priority == priority.value)
+        stmt = stmt.order_by(ServerSideEventEntity.priority.desc(), ServerSideEventEntity.created_at.desc())
         sa_session = self.app.dbmgr.get_db_session()
         result = sa_session.execute(stmt).scalars().all()
         return result
 
     def mark_event_as_read(self, event_id, user_id):
         sa_session = self.app.dbmgr.get_db_session()
-        event: EventEntity = sa_session.execute(select(EventEntity).where(EventEntity.id == event_id)) # EventEntity.query.get(event_id)
+        event: ServerSideEventEntity = sa_session.execute(select(ServerSideEventEntity).where(ServerSideEventEntity.id == event_id)) # ServerSideEventEntity.query.get(event_id)
         if event and (event.user_id == user_id or event.is_global):
             event.is_read = True
             sa_session.commit()
