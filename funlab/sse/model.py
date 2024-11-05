@@ -12,12 +12,6 @@ from sqlalchemy.ext.hybrid import hybrid_property
 # all of application's entity, use same registry to declarate
 from funlab.core.appbase import APP_ENTITIES_REGISTRY as entities_registry
 
-# class EventType(Enum):
-#     NOTIFICATION = "notification"
-#     ALERT = "alert"
-#     MESSAGE = "message"
-#     SYSTEM = "system"
-
 @dataclass
 class ServerSideEvent(_Readable):
     event_type: str
@@ -26,6 +20,9 @@ class ServerSideEvent(_Readable):
     is_read: bool = False
     created_at: float = datetime.now(timezone.utc).timestamp()
     expires_at: float = None
+
+    def is_global(self):
+        return self.user_id is None
 
 @entities_registry.mapped
 @dataclass
@@ -61,15 +58,3 @@ class ServerSideEventEntity(ServerSideEvent):
 
     def to_json(self):
         return self.to_dto().to_json()
-
-
-    # def to_dict(self):
-    #     """將數據庫記錄轉換為事件字典"""
-    #     return {
-    #         'id': self.id,
-    #         'type': self.event_type,
-    #         'payload': self.payload,
-    #         'user_id': self.user_id,
-    #         'is_global': self.is_global,
-    #         'expires_at': self.expires_at.isoformat() if self.expires_at else None
-    #     }
