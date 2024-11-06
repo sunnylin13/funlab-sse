@@ -12,6 +12,8 @@ from sqlalchemy.ext.hybrid import hybrid_property
 # all of application's entity, use same registry to declarate
 from funlab.core.appbase import APP_ENTITIES_REGISTRY as entities_registry
 
+from sqlalchemy.orm import registry
+entities_registry = registry()
 @dataclass
 class ServerSideEvent(_Readable):
     event_type: str
@@ -21,8 +23,13 @@ class ServerSideEvent(_Readable):
     created_at: float = datetime.now(timezone.utc).timestamp()
     expires_at: float = None
 
+    @property
     def is_global(self):
         return self.user_id is None
+    
+    @property
+    def is_expired(self):
+        return self.expires_at and datetime.now(timezone.utc).timestamp() > self.expires_at
 
 @entities_registry.mapped
 @dataclass

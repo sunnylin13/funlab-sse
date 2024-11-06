@@ -10,12 +10,55 @@ from flask import Flask
 from funlab.core.dbmgr import DbMgr
 from funlab.flaskr.app import FunlabFlask
 from funlab.utils import log
-from sqlalchemy import select
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session, scoped_session, sessionmaker
 from contextlib import contextmanager
 
 from .model import ServerSideEvent, ServerSideEventEntity
 
+class EventStorageSystem:
+    def __init__(self, db_url):
+        self.engine = create_engine(db_url)
+        self.Session = scoped_session(sessionmaker(bind=self.engine))
+
+    
+    @contextmanager
+    def session_scope(self):
+        session = self.Session()
+        try:
+            yield session
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            raise e
+        finally:
+            session.close()
+    
+    def store_event(self, event_data: dict):
+        with self.session_scope() as session:
+            queued_event = ServerSideEventEntity(
+                event_type=event_data['type'],
+                payload=event_data['payload'],
+                user_id=event_data.get('user_id'),
+                is_global=event_data.get('is_global', False),
+                priority=event_data.get('priority', 2),
+                expires_at=datetime.fromisoformat(event_data['expires_at'])
+                    if 'expires_at' in event_data else None
+            )
+            session.add(queued_event)
+    
+    def load_pending_events(self):
+        with self.session_scope() as session:
+            return session.query(ServerSideEventEntity).filter_by(
+                status=EventStatus.PENDING
+            ).order_by(ServerSideEventEntity.priority.desc()).all()
+    
+    def mark_event_delivered(self, event_id):
+        with self.session_scope() as session:
+            event = session.query(ServerSideEventEntity).get(event_id)
+            if event:
+                event.status = EventStatus.DELIVERED
+                event.delivered_at = datetime.utcnow()
 class ServerSideEventMgr:
     def __init__(self, dbmgr:DbMgr, max_queue_size=1000, max_client_events=100):
         self.mylogger = log.get_logger(self.__class__.__name__, level=logging.INFO)
@@ -133,10 +176,10 @@ class ServerSideEventMgr:
                 if not self.active_user_streams[user_id]:
                     del self.active_user_streams[user_id]
 
-    def create_event(self, event_type: str, data: Dict[Any, Any], user_id: int = None, expires_in: int = 3600):
+    def create_event(self, event_type: str, payload: Dict[Any, Any], user_id: int = None, expires_in: int = 3600):
         event = {
             'type': event_type,
-            'data': data,
+            'payload': payload,
             'user_id': user_id,
             'expires_at': (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
         }
