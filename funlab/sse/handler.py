@@ -69,14 +69,14 @@ class ServerSideEventMgr:
         self.max_client_events = max_client_events
         self.lock = threading.Lock()
         self.is_shutting_down = False
-        self._recover_unprocessed_events()
+        self._recover_stored_events()
         self.distributor_thread = self.start_event_distributor()
 
     @property
     def all_event_queues(self)->list[queue.Queue]:
         return list(self.user_event_queues.values()).insert(0, self.global_event_queue)
 
-    def _recover_unprocessed_events(self):
+    def _recover_stored_events(self):
         with self.dbmgr.session_context() as session:
             stmt = select(ServerSideEventEntity).where(ServerSideEventEntity.is_expired() == False).order_by(ServerSideEventEntity.created_at.asc())
             unprocessed_events: list[ServerSideEventEntity] = session.execute(stmt).scalars().all()
