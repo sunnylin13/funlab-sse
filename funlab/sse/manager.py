@@ -14,52 +14,52 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, scoped_session, sessionmaker
 from contextlib import contextmanager
 
-from .model import ServerSideEvent, ServerSideEventEntity
+from .model import EventBase, EventPriority, PayloadBase, ServerSideEvent, EventEntity
 
-class EventStorageSystem:
-    def __init__(self, db_url):
-        self.engine = create_engine(db_url)
-        self.Session = scoped_session(sessionmaker(bind=self.engine))
+# class EventStorageSystem:
+#     def __init__(self, db_url):
+#         self.engine = create_engine(db_url)
+#         self.Session = scoped_session(sessionmaker(bind=self.engine))
 
-    
-    @contextmanager
-    def session_scope(self):
-        session = self.Session()
-        try:
-            yield session
-            session.commit()
-        except Exception as e:
-            session.rollback()
-            raise e
-        finally:
-            session.close()
-    
-    def store_event(self, event_data: dict):
-        with self.session_scope() as session:
-            queued_event = ServerSideEventEntity(
-                event_type=event_data['type'],
-                payload=event_data['payload'],
-                user_id=event_data.get('user_id'),
-                is_global=event_data.get('is_global', False),
-                priority=event_data.get('priority', 2),
-                expires_at=datetime.fromisoformat(event_data['expires_at'])
-                    if 'expires_at' in event_data else None
-            )
-            session.add(queued_event)
-    
-    def load_pending_events(self):
-        with self.session_scope() as session:
-            return session.query(ServerSideEventEntity).filter_by(
-                status=EventStatus.PENDING
-            ).order_by(ServerSideEventEntity.priority.desc()).all()
-    
-    def mark_event_delivered(self, event_id):
-        with self.session_scope() as session:
-            event = session.query(ServerSideEventEntity).get(event_id)
-            if event:
-                event.status = EventStatus.DELIVERED
-                event.delivered_at = datetime.utcnow()
-class ServerSideEventMgr:
+
+#     @contextmanager
+#     def session_scope(self):
+#         session = self.Session()
+#         try:
+#             yield session
+#             session.commit()
+#         except Exception as e:
+#             session.rollback()
+#             raise e
+#         finally:
+#             session.close()
+
+#     def store_event(self, event_data: dict):
+#         with self.session_scope() as session:
+#             queued_event = EventEntity(
+#                 event_type=event_data['type'],
+#                 payload=event_data['payload'],
+#                 user_id=event_data.get('user_id'),
+#                 is_global=event_data.get('is_global', False),
+#                 priority=event_data.get('priority', 2),
+#                 expires_at=datetime.fromisoformat(event_data['expires_at'])
+#                     if 'expires_at' in event_data else None
+#             )
+#             session.add(queued_event)
+
+#     def load_pending_events(self):
+#         with self.session_scope() as session:
+#             return session.query(EventEntity).filter_by(
+#                 status=EventStatus.PENDING
+#             ).order_by(EventEntity.priority.desc()).all()
+
+#     def mark_event_delivered(self, event_id):
+#         with self.session_scope() as session:
+#             event = session.query(EventEntity).get(event_id)
+#             if event:
+#                 event.status = EventStatus.DELIVERED
+#                 event.delivered_at = datetime.utcnow()
+class EventManager:
     def __init__(self, dbmgr:DbMgr, max_queue_size=1000, max_client_events=100):
         self.mylogger = log.get_logger(self.__class__.__name__, level=logging.INFO)
         self.dbmgr:DbMgr = dbmgr
@@ -78,8 +78,8 @@ class ServerSideEventMgr:
 
     def _recover_stored_events(self):
         with self.dbmgr.session_context() as session:
-            stmt = select(ServerSideEventEntity).where(ServerSideEventEntity.is_expired() == False).order_by(ServerSideEventEntity.created_at.asc())
-            unprocessed_events: list[ServerSideEventEntity] = session.execute(stmt).scalars().all()
+            stmt = select(EventEntity).where(EventEntity.is_expired() == False).order_by(EventEntity.created_at.asc())
+            unprocessed_events: list[EventEntity] = session.execute(stmt).scalars().all()
             for event_record in unprocessed_events:
                 try:
                     if event_record.is_global:
@@ -118,13 +118,7 @@ class ServerSideEventMgr:
 
     def _store_event(self, event: dict[str, Any]):
         with self.dbmgr.session_context() as session:
-            queued_event = ServerSideEventEntity(
-                event_type=event['type'],
-                payload=event['payload'],
-                user_id=event.get('user_id'),
-                is_read=event.get('is_read', False),
-                expires_at=datetime.fromisoformat(event['expires_at']) if event.get('expires_at') else None
-            )
+
             session.add(queued_event)
 
     def shutdown(self):
@@ -176,19 +170,39 @@ class ServerSideEventMgr:
                 if not self.active_user_streams[user_id]:
                     del self.active_user_streams[user_id]
 
-    def create_event(self, event_type: str, payload: Dict[Any, Any], user_id: int = None, expires_in: int = 3600):
-        event = {
-            'type': event_type,
-            'payload': payload,
-            'user_id': user_id,
-            'expires_at': (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
-        }
-        self._store_event(event)
-        try:
-            self.global_event_queue.put_nowait(event)
-        except queue.Full:
-            try:
-                self.global_event_queue.get_nowait()
-                self.global_event_queue.put_nowait(event)
-            except:
-                pass
+
+    # def create_event(self, event_type: str, payload: Dict[Any, Any], user_id: int = None, expires_in: int = 3600):
+    #     event = {
+    #         'type': event_type,
+    #         'payload': payload,
+    #         'user_id': user_id,
+    #         'expires_at': (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
+    #     }
+    #     self._store_event(event)
+    #     try:
+    #         self.global_event_queue.put_nowait(event)
+    #     except queue.Full:
+    #         try:
+    #             self.global_event_queue.get_nowait()
+    #             self.global_event_queue.put_nowait(event)
+    #         except:
+    #             pass
+
+class EventFactory:
+    _event_classes: dict[str, type[EventBase]] = {}
+
+    @classmethod
+    def register_event(cls, event_type: str, event_class: type[EventBase]):
+        cls._event_classes[event_type] = event_class
+
+    @classmethod
+    def create_event(cls, event_type: str, payload: PayloadBase,
+                    target_userid: int = None, priority: EventPriority = EventPriority.NORMAL, is_read: bool = False,
+                    created_at: datetime = datetime.now(timezone.utc), expires_at: datetime = None, **kwargs) -> EventBase:
+        if event_type not in cls._event_classes:
+            raise ValueError(f"Unknown event type: {event_type}")
+        event_class = cls._event_classes[event_type]
+        return event_class(event_type=event_type, payload=payload,
+                           target_userid=target_userid, priority=priority, is_read=is_read, created_at=created_at, expires_at=expires_at,
+                           **kwargs)
+
