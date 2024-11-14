@@ -42,8 +42,8 @@ from .model import EventBase, EventPriority, PayloadBase, ServerSideEvent, Event
 #                 user_id=event_data.get('user_id'),
 #                 is_global=event_data.get('is_global', False),
 #                 priority=event_data.get('priority', 2),
-#                 expires_at=datetime.fromisoformat(event_data['expires_at'])
-#                     if 'expires_at' in event_data else None
+#                 expired_at=datetime.fromisoformat(event_data['expired_at'])
+#                     if 'expired_at' in event_data else None
 #             )
 #             session.add(queued_event)
 
@@ -176,7 +176,7 @@ class EventManager:
     #         'type': event_type,
     #         'payload': payload,
     #         'user_id': user_id,
-    #         'expires_at': (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
+    #         'expired_at': (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
     #     }
     #     self._store_event(event)
     #     try:
@@ -198,11 +198,11 @@ class EventFactory:
     @classmethod
     def create_event(cls, event_type: str, payload: PayloadBase,
                     target_userid: int = None, priority: EventPriority = EventPriority.NORMAL, is_read: bool = False,
-                    created_at: datetime = datetime.now(timezone.utc), expires_at: datetime = None, **kwargs) -> EventBase:
+                    created_at: datetime = datetime.now(timezone.utc), expired_at: datetime = None, **kwargs) -> EventBase:
         if event_type not in cls._event_classes:
             raise ValueError(f"Unknown event type: {event_type}")
         event_class = cls._event_classes[event_type]
         return event_class(event_type=event_type, payload=payload,
-                           target_userid=target_userid, priority=priority, is_read=is_read, created_at=created_at, expires_at=expires_at,
+                           target_userid=target_userid, priority=priority, is_read=is_read, created_at=created_at, expired_at=expired_at,
                            **kwargs)
 

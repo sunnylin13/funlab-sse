@@ -25,12 +25,12 @@ class SSEService(ServicePlugin):
     @classmethod
     def create_event(cls, event_type: str, payload: PayloadBase,
                     target_userid: int = None, priority: EventPriority = EventPriority.NORMAL, is_read: bool = False,
-                    created_at: datetime = datetime.now(timezone.utc), expires_at: datetime = None, **kwargs) -> EventBase:
+                    created_at: datetime = datetime.now(timezone.utc), expired_at: datetime = None, **kwargs) -> EventBase:
         if event_type not in cls._event_classes:
             raise ValueError(f"Unknown event type: {event_type}")
         event_class = cls._event_classes[event_type]
         return event_class(event_type=event_type, payload=payload,
-                           target_userid=target_userid, priority=priority, is_read=is_read, created_at=created_at, expires_at=expires_at,
+                           target_userid=target_userid, priority=priority, is_read=is_read, created_at=created_at, expired_at=expired_at,
                            **kwargs)
 
     def __init__(self, app:FunlabFlask):

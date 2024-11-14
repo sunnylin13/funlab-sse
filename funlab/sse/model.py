@@ -36,7 +36,7 @@ class EventBase(_Readable):
     priority: EventPriority = EventPriority.NORMAL
     is_read: bool = False
     created_at: datetime = datetime.now(timezone.utc)
-    expires_at: datetime = None
+    expired_at: datetime = None
 
     @property
     def is_global(self):
@@ -44,7 +44,7 @@ class EventBase(_Readable):
 
     @property
     def is_expired(self):
-        return self.expires_at and datetime.now(timezone.utc) > self.expires_at
+        return self.expired_at and datetime.now(timezone.utc) > self.expired_at
 
     def to_json(self):
         return super().to_json()
@@ -67,7 +67,7 @@ class EventEntity(EventBase):
     # is_read: bool = field(default=False, metadata={'sa': Column(Boolean, default=False, nullable=False)})
 
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc), metadata={'sa': Column(DateTime(timezone=True), nullable=False)})
-    expires_at: datetime = field(default=None, metadata={'sa': Column(DateTime(timezone=True), nullable=True)})
+    expired_at: datetime = field(default=None, metadata={'sa': Column(DateTime(timezone=True), nullable=True)})
 
     read_users: list['ReadEventUsers'] = field(default_factory=list, metadata={'sa': relationship('ReadEventUsers', back_populates='event')})
 
@@ -87,7 +87,7 @@ class EventEntity(EventBase):
 
     @hybrid_property
     def is_expired(self):
-        return self.expires_at and datetime.now(timezone.utc) > self.expires_at
+        return self.expired_at and datetime.now(timezone.utc) > self.expired_at
 
     def to_dto(self):  # EventBase, Data transfer object
         if isinstance(self.payload, str):
@@ -102,7 +102,7 @@ class EventEntity(EventBase):
             priority=self.priority,
             is_read=self.is_read,
             created_at=self.created_at,
-            expires_at=self.expires_at
+            expired_at=self.expired_at
         )
 
     def to_json(self):
@@ -116,10 +116,10 @@ class EventEntity(EventBase):
 
     @property
     def local_expires_at(self):
-        """Convert expires_at to the local timezone for display."""
-        if self.expires_at:
+        """Convert expired_at to the local timezone for display."""
+        if self.expired_at:
             local_tz = get_localzone()
-            return self.expires_at.astimezone(local_tz)
+            return self.expired_at.astimezone(local_tz)
         return None
 
 @entities_registry.mapped
@@ -146,16 +146,16 @@ class TaskCompletedEvent(EventBase):
 
     def __init__(self, task_name: str, task_result: str, task_start_time: datetime, task_end_time: datetime,
                  target_userid: int = None, priority: EventPriority = EventPriority.NORMAL, is_read: bool = False,
-                 created_at: datetime = datetime.now(timezone.utc), expires_at: datetime = None):
+                 created_at: datetime = datetime.now(timezone.utc), expired_at: datetime = None):
         self.payload = TaskCompletedPayload(task_name=task_name, task_result=task_result, task_start_time=task_start_time, task_end_time=task_end_time)
         self.target_userid = target_userid
         self.priority = priority
         self.is_read = is_read
         self.created_at = created_at
-        self.expires_at = expires_at
+        self.expired_at = expired_at
 
     def __str__(self):
-        return f"TaskCompletedEvent(task_name={self.payload.task_name}, task_result={self.payload.task_result}, task_start_time={self.payload.task_start_time}, task_end_time={self.payload.task_end_time}, target_userid={self.target_userid}, priority={self.priority}, is_read={self.is_read}, created_at={self.created_at}, expires_at={self.expires_at})"
+        return f"TaskCompletedEvent(task_name={self.payload.task_name}, task_result={self.payload.task_result}, task_start_time={self.payload.task_start_time}, task_end_time={self.payload.task_end_time}, target_userid={self.target_userid}, priority={self.priority}, is_read={self.is_read}, created_at={self.created_at}, expired_at={self.expired_at})"
 
     def __repr__(self):
         return self.__str__()

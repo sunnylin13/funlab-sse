@@ -50,7 +50,7 @@ class QueuedEvent(Base):
     priority = Column(Integer, default=EventPriority.NORMAL, index=True)
     status = Column(SQLAEnum(EventStatus), default=EventStatus.PENDING, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
-    expires_at = Column(DateTime, nullable=True)
+    expired_at = Column(DateTime, nullable=True)
     delivered_at = Column(DateTime, nullable=True)
     retry_count = Column(Integer, default=0)
 
@@ -62,13 +62,13 @@ class EventValidator:
         if not all(field in event_data for field in required_fields):
             return False, f"Missing required fields: {required_fields - set(event_data.keys())}"
         
-        if 'expires_at' in event_data:
+        if 'expired_at' in event_data:
             try:
-                expires_at = datetime.fromisoformat(event_data['expires_at'])
-                if expires_at < datetime.utcnow():
+                expired_at = datetime.fromisoformat(event_data['expired_at'])
+                if expired_at < datetime.utcnow():
                     return False, "Event already expired"
             except ValueError:
-                return False, "Invalid expires_at format"
+                return False, "Invalid expired_at format"
         
         if 'priority' in event_data:
             try:
@@ -154,8 +154,8 @@ class EventStorage:
                 user_id=event_data.get('user_id'),
                 is_global=event_data.get('is_global', False),
                 priority=event_data.get('priority', EventPriority.NORMAL),
-                expires_at=datetime.fromisoformat(event_data['expires_at'])
-                    if 'expires_at' in event_data else None
+                expired_at=datetime.fromisoformat(event_data['expired_at'])
+                    if 'expired_at' in event_data else None
             )
             session.add(event)
             session.commit()
@@ -243,7 +243,7 @@ class EnhancedEventNotificationSystem:
             'user_id': user_id,
             'is_global': is_global,
             'priority': priority,
-            'expires_at': (datetime.utcnow() + timedelta(seconds=expires_in)).isoformat()
+            'expired_at': (datetime.utcnow() + timedelta(seconds=expires_in)).isoformat()
         }
         
         # Validate event
@@ -271,9 +271,9 @@ class EnhancedEventNotificationSystem:
                     priority, event = self.global_event_queue.get(timeout=1)
                     
                     # Check expiration
-                    if 'expires_at' in event:
-                        expires_at = datetime.fromisoformat(event['expires_at'])
-                        if expires_at < datetime.utcnow():
+                    if 'expired_at' in event:
+                        expired_at = datetime.fromisoformat(event['expired_at'])
+                        if expired_at < datetime.utcnow():
                             continue
                     
                     start_time = time.time()
@@ -381,9 +381,9 @@ def create_app(config_object=Config):
                         event = user_stream.get(timeout=Config.HEARTBEAT_INTERVAL)
                         
                         # Check expiration
-                        if event.get('expires_at'):
-                            expires_at = datetime.fromisoformat(event['expires_at'])
-                            if expires_at < datetime.utcnow():
+                        if event.get('expired_at'):
+                            expired_at = datetime.fromisoformat(event['expired_at'])
+                            if expired_at < datetime.utcnow():
                                 continue
                         
                         yield f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
