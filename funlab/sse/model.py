@@ -1,162 +1,267 @@
-# models.py
+﻿"""
+Canonical SSE event models for funlab-sse plugin.
+
+This module is the authoritative source for SSE-related SQLAlchemy entities.
+funlab-flaskr/sse/models.py acts as a shim that imports from here when this
+package is installed, avoiding duplicate APP_ENTITIES_REGISTRY registrations.
+"""
+from __future__ import annotations
+
+import json
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from enum import Enum
-import time
-from flask import Response, stream_with_context
+from typing import get_type_hints
+
 from funlab.core import _Readable
-from pydantic import BaseModel
-from sqlalchemy import JSON, Boolean, Column, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint, or_, select
-from sqlalchemy.orm import relationship
+from sqlalchemy import JSON, Boolean, Column, DateTime, Integer, String, and_, func
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.ext.hybrid import hybrid_property
-# all of application's entity, use same registry to declarate
-from funlab.core.appbase import APP_ENTITIES_REGISTRY as entities_registry
-#from sqlalchemy.orm import registry
-#entities_registry = registry()
 from tzlocal import get_localzone
-class PayloadBase(BaseModel):
+
+# All application entities share the same registry for cross-package table
+# awareness (FK resolution, joined-table inheritance, etc.)
+from funlab.core.appbase import APP_ENTITIES_REGISTRY as entities_registry
+
+
+# ---------------------------------------------------------------------------
+# Payload base
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PayloadBase:
+    """Base class for strongly-typed event payloads."""
+
     @classmethod
     def from_jsonstr(cls, payload_str: str) -> 'PayloadBase':
-        return cls.model_validate_json(payload_str)
+        data = json.loads(payload_str)
+        return cls(**data)
 
-    def to_json(self):
-        return self.model_dump_json()
+    def to_json(self) -> str:
+        return json.dumps(self.__dict__)
+
+    def __str__(self) -> str:
+        return self.to_json()
+
+
+# ---------------------------------------------------------------------------
+# Priority
+# ---------------------------------------------------------------------------
 
 class EventPriority(Enum):
     LOW = 0
     NORMAL = 1
     HIGH = 2
     CRITICAL = 3
+
+
+# ---------------------------------------------------------------------------
+# EventBase  (pure-Python dataclass, no DB mapping)
+# ---------------------------------------------------------------------------
+
 @dataclass
 class EventBase(_Readable):
-    event_type: str
-    payload: PayloadBase
-    target_userid: int = None
+    """In-memory representation of a single, user-targeted SSE event.
+
+    Design notes
+    ------------
+    * ``target_userid`` is always set -- global broadcasts are handled by the
+      caller iterating over online users and creating individual events.
+    * ``is_read`` tracks per-user delivery acknowledgement.
+    * ``is_recovered`` marks events that were loaded from DB on reconnect.
+    """
+
+    id: int = field(init=False)
+    event_type: str = field(init=False)
+    payload: PayloadBase = field(init=False)
+    target_userid: int
     priority: EventPriority = EventPriority.NORMAL
-    is_read: bool = False
-    created_at: datetime = datetime.now(timezone.utc)
+    is_read: bool = field(init=False, default=False)
+    is_recovered: bool = field(init=False, default=False)
+    created_at: datetime = field(init=False, default_factory=lambda: datetime.now(timezone.utc))
     expired_at: datetime = None
 
-    @property
-    def is_global(self):
-        return self.target_userid is None
+    def __init__(
+        self,
+        target_userid: int = None,
+        priority: EventPriority = EventPriority.NORMAL,
+        expired_at: datetime = None,
+        payload: PayloadBase = None,
+        **payload_kwargs,
+    ):
+        self.id = None
+        self.event_type = self.__class__.__name__.removesuffix('Event')
+        if payload:
+            self.payload = payload
+        else:
+            payload_cls = get_type_hints(self.__class__).get('payload', self.__annotations__['payload'])
+            self.payload = payload_cls(**payload_kwargs)
+        self.target_userid = target_userid
+        self.priority = priority
+        self.is_read = False
+        self.is_recovered = False
+        self.created_at = datetime.now(timezone.utc)
+        self.expired_at = expired_at
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
 
     @property
-    def is_expired(self):
-        return self.expired_at and datetime.now(timezone.utc) > self.expired_at
+    def is_expired(self) -> bool:
+        return bool(self.expired_at and datetime.now(timezone.utc) > self.expired_at)
 
-    def to_json(self):
+    @property
+    def local_created_at(self) -> datetime:
+        """created_at converted to the local timezone."""
+        return self.created_at.astimezone(get_localzone())
+
+    @property
+    def local_expires_at(self):
+        """expired_at converted to the local timezone (None if no expiry)."""
+        return self.expired_at.astimezone(get_localzone()) if self.expired_at else None
+
+    # ------------------------------------------------------------------
+    # Serialisation
+    # ------------------------------------------------------------------
+
+    def to_json(self) -> str:
         return super().to_json()
 
-    def to_sse(self):
-        """ Format the event as a Server-Sent Event. """
+    def to_dict(self) -> dict:
+        """Serialise to a dict suitable for JSON-encoding and sending to the browser."""
+        return {
+            "id": self.id,
+            "event_type": self.event_type,
+            "priority": self.priority.name,
+            "created_at": self.created_at.isoformat(),
+            "payload": self.payload.__dict__ if self.payload else {},
+            "is_recovered": self.is_recovered,
+        }
+
+    # ------------------------------------------------------------------
+    # DB round-trip helpers
+    # ------------------------------------------------------------------
+
+    def to_entity(self):
+        """Convert to an EventEntity for persistence.
+
+        Returns None when the event is already read/expired (nothing to store).
+        """
+        if self.is_read or self.is_expired:
+            return None
+        entity = EventEntity(
+            event_type=self.event_type,
+            payload=self.payload.to_json(),
+            target_userid=self.target_userid,
+            priority=self.priority,
+            expired_at=self.expired_at,
+        )
+        entity.is_read = self.is_read
+        entity.created_at = self.created_at
+        return entity
+
+    @classmethod
+    def from_entity(cls, entity: 'EventEntity'):
+        """Reconstruct an in-memory event from a DB row.
+
+        Returns None when the entity is already read/expired.
+        """
+        if entity.is_read or entity.is_expired:
+            return None
+        payload_cls = get_type_hints(cls).get('payload', cls.__annotations__['payload'])
+        payload_obj = (
+            payload_cls.from_jsonstr(entity.payload)
+            if isinstance(entity.payload, str)
+            else entity.payload
+        )
+        event = cls(
+            target_userid=entity.target_userid,
+            priority=entity.priority,
+            expired_at=entity.expired_at,
+            payload=payload_obj,
+        )
+        event.id = entity.id
+        event.is_read = entity.is_read
+        event.created_at = entity.created_at
+        return event
+
+    def sse_format(self) -> str:
+        """Legacy SSE wire format (deprecated -- prefer to_dict())."""
         return f"event: {self.event_type}\ndata: {self.payload.to_json()}\n\n"
+
+
+# ---------------------------------------------------------------------------
+# EventEntity  (SQLAlchemy-mapped DB table)
+# ---------------------------------------------------------------------------
 
 @entities_registry.mapped
 @dataclass
 class EventEntity(EventBase):
+    """Persistent representation of an SSE event stored in the ``event`` table."""
+
     __tablename__ = 'event'
     __sa_dataclass_metadata_key__ = 'sa'
 
-    id: int = field(init=False, metadata={'sa': Column(Integer, primary_key=True, autoincrement=True)})
-    event_type: str = field(metadata={'sa': Column(String(50), nullable=False)})
-    payload: PayloadBase = field(metadata={'sa': Column(JSON, nullable=False)})
-    target_userid: int = field(default=None, metadata={'sa': Column(Integer, ForeignKey('user.id'), nullable=True)})
-    priority: EventPriority = field(default=None, metadata={'sa': Column(SQLEnum(EventPriority), default=EventPriority.NORMAL, nullable=False)})
-    # is_read: bool = field(default=False, metadata={'sa': Column(Boolean, default=False, nullable=False)})
-
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc), metadata={'sa': Column(DateTime(timezone=True), nullable=False)})
-    expired_at: datetime = field(default=None, metadata={'sa': Column(DateTime(timezone=True), nullable=True)})
-
-    read_users: list['ReadEventUsers'] = field(default_factory=list, metadata={'sa': relationship('ReadEventUsers', back_populates='event')})
-
-    def post_init(self):
-        self.payload = PayloadBase.from_jsonstr(self.payload)  # Convert payload from JSON string to object
-
-    def is_all_read(self, users: list[int]) -> bool:
-        read_user_ids = {read_user.user_id for read_user in self.read_users}
-        return all(user_id in read_user_ids for user_id in users)
-
-    def post_init(self):
-        self.payload = PayloadBase.from_jsonstr(self.payload)  # Convert payload from JSON string to object
+    id: int = field(
+        init=False,
+        metadata={'sa': Column(Integer, primary_key=True, autoincrement=True)},
+    )
+    event_type: str = field(
+        metadata={'sa': Column(String(50), nullable=False)},
+    )
+    payload: PayloadBase = field(
+        metadata={'sa': Column(JSON, nullable=False)},
+    )
+    target_userid: int = field(
+        default=None,
+        # Plain Integer — no ORM-level FK to 'user.id'.
+        # SSE is a cross-plugin concern: it stores a user-id as an opaque
+        # integer filter value only. Declaring ForeignKey('user.id') here
+        # would force funlab-auth to be imported before the SSE table can
+        # be created, breaking plugin isolation.  DB-level FK integrity is
+        # the responsibility of migration tooling (Alembic), not the mapper.
+        metadata={'sa': Column(Integer, nullable=True)},
+    )
+    priority: EventPriority = field(
+        default=None,
+        metadata={'sa': Column(SQLEnum(EventPriority), default=EventPriority.NORMAL, nullable=False)},
+    )
+    is_read: bool = field(
+        init=False,
+        default=False,
+        metadata={'sa': Column(Boolean, nullable=False, default=False)},
+    )
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        metadata={'sa': Column(DateTime(timezone=True), nullable=False)},
+    )
+    expired_at: datetime = field(
+        default=None,
+        metadata={'sa': Column(DateTime(timezone=True), nullable=True)},
+    )
 
     @hybrid_property
-    def is_global(self):
-        return self.target_userid is None
+    def is_expired(self) -> bool:
+        return bool(self.expired_at and datetime.now(timezone.utc) > self.expired_at)
 
-    @hybrid_property
-    def is_expired(self):
-        return self.expired_at and datetime.now(timezone.utc) > self.expired_at
+    @is_expired.expression
+    def is_expired(cls):
+        return and_(cls.expired_at.isnot(None), cls.expired_at < func.now())
 
-    def to_dto(self):  # EventBase, Data transfer object
-        if isinstance(self.payload, str):
-            payload = PayloadBase.from_jsonstr(self.payload)
-        else:
-            payload = self.payload
 
-        return EventBase(
-            event_type=self.event_type,
-            payload=payload,
-            target_userid=self.target_userid,
-            priority=self.priority,
-            is_read=self.is_read,
-            created_at=self.created_at,
-            expired_at=self.expired_at
-        )
+# ---------------------------------------------------------------------------
+# Built-in event types
+# ---------------------------------------------------------------------------
 
-    def to_json(self):
-        return self.to_dto().to_json()
-
-    @property
-    def local_created_at(self):
-        """Convert created_at to the local timezone for display."""
-        local_tz = get_localzone()
-        return self.created_at.astimezone(local_tz)
-
-    @property
-    def local_expires_at(self):
-        """Convert expired_at to the local timezone for display."""
-        if self.expired_at:
-            local_tz = get_localzone()
-            return self.expired_at.astimezone(local_tz)
-        return None
-
-@entities_registry.mapped
 @dataclass
-class ReadEventUsers:
-    __tablename__ = 'read_event_users'
-    __sa_dataclass_metadata_key__ = 'sa'
+class SystemNotificationPayload(PayloadBase):
+    """Payload for user-visible system notification toasts."""
+    title: str
+    message: str
 
-    id: int = field(init=False, metadata={'sa': Column(Integer, primary_key=True, autoincrement=True)})
-    event_id: int = field(metadata={'sa': Column(Integer, ForeignKey('event.id'), nullable=False)})
-    user_id: int = field(metadata={'sa': Column(Integer, ForeignKey('user.id'), nullable=False)})
-    read_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc), metadata={'sa': Column(DateTime(timezone=True), nullable=False)})
 
-    event: EventEntity = field(metadata={'sa': relationship('EventEntity', back_populates='read_users')})
-class TaskCompletedPayload(PayloadBase):
-    task_name: str
-    task_result: str
-    task_start_time: datetime
-    task_end_time: datetime
-
-class TaskCompletedEvent(EventBase):
-    event_type = 'task_completed'
-    payload: TaskCompletedPayload
-
-    def __init__(self, task_name: str, task_result: str, task_start_time: datetime, task_end_time: datetime,
-                 target_userid: int = None, priority: EventPriority = EventPriority.NORMAL, is_read: bool = False,
-                 created_at: datetime = datetime.now(timezone.utc), expired_at: datetime = None):
-        self.payload = TaskCompletedPayload(task_name=task_name, task_result=task_result, task_start_time=task_start_time, task_end_time=task_end_time)
-        self.target_userid = target_userid
-        self.priority = priority
-        self.is_read = is_read
-        self.created_at = created_at
-        self.expired_at = expired_at
-
-    def __str__(self):
-        return f"TaskCompletedEvent(task_name={self.payload.task_name}, task_result={self.payload.task_result}, task_start_time={self.payload.task_start_time}, task_end_time={self.payload.task_end_time}, target_userid={self.target_userid}, priority={self.priority}, is_read={self.is_read}, created_at={self.created_at}, expired_at={self.expired_at})"
-
-    def __repr__(self):
-        return self.__str__()
-
+@dataclass(init=False)
+class SystemNotificationEvent(EventBase):
+    """Standard in-app notification event (SSE event type: SystemNotification)."""
+    payload: SystemNotificationPayload

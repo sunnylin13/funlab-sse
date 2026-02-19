@@ -1,208 +1,399 @@
+﻿"""
+SSE EventManager & ConnectionManager for funlab-sse plugin.
+
+Ported and fixed from funlab-flaskr/funlab/flaskr/sse/manager.py:
+  Bug fixes applied:
+  - clean_up_events(): Python `or` replaced with SQLAlchemy `|` operator
+  - remove_all_connections(): UUID stream_id cannot start with user_id;
+    all orphaned connect-time entries are now purged on user disconnect.
+"""
+from __future__ import annotations
+
 import logging
 import queue
 import threading
-import json
-import signal
-import atexit
+import time
+import uuid
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Set
-from flask import Flask
+from typing import Dict, Set
+
 from funlab.core.dbmgr import DbMgr
-from funlab.flaskr.app import FunlabFlask
 from funlab.utils import log
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session, scoped_session, sessionmaker
-from contextlib import contextmanager
+from sqlalchemy import select
 
-from .model import EventBase, EventPriority, PayloadBase, ServerSideEvent, EventEntity
-
-# class EventStorageSystem:
-#     def __init__(self, db_url):
-#         self.engine = create_engine(db_url)
-#         self.Session = scoped_session(sessionmaker(bind=self.engine))
+from .model import EventBase, EventEntity, EventPriority
 
 
-#     @contextmanager
-#     def session_scope(self):
-#         session = self.Session()
-#         try:
-#             yield session
-#             session.commit()
-#         except Exception as e:
-#             session.rollback()
-#             raise e
-#         finally:
-#             session.close()
+# ---------------------------------------------------------------------------
+# ConnectionManager
+# ---------------------------------------------------------------------------
 
-#     def store_event(self, event_data: dict):
-#         with self.session_scope() as session:
-#             queued_event = EventEntity(
-#                 event_type=event_data['type'],
-#                 payload=event_data['payload'],
-#                 user_id=event_data.get('user_id'),
-#                 is_global=event_data.get('is_global', False),
-#                 priority=event_data.get('priority', 2),
-#                 expired_at=datetime.fromisoformat(event_data['expired_at'])
-#                     if 'expired_at' in event_data else None
-#             )
-#             session.add(queued_event)
+class ConnectionManager:
+    """Manages per-user SSE stream connections.
 
-#     def load_pending_events(self):
-#         with self.session_scope() as session:
-#             return session.query(EventEntity).filter_by(
-#                 status=EventStatus.PENDING
-#             ).order_by(EventEntity.priority.desc()).all()
+    Each connection is identified by a UUID ``stream_id`` and assigned to a
+    specific ``event_type``.  Multiple concurrent connections per user
+    (e.g. multiple browser tabs) are supported up to ``max_connections_per_user``.
+    """
 
-#     def mark_event_delivered(self, event_id):
-#         with self.session_scope() as session:
-#             event = session.query(EventEntity).get(event_id)
-#             if event:
-#                 event.status = EventStatus.DELIVERED
-#                 event.delivered_at = datetime.utcnow()
+    def __init__(self, max_connections_per_user: int = 10):
+        self.max_connections = max_connections_per_user
+        # user_id -> {stream_id: Queue}
+        self.user_connections: Dict[int, Dict[str, queue.Queue]] = defaultdict(dict)
+        # event_type -> set of connected user_ids
+        self.eventtype_connection_users: Dict[str, Set[int]] = defaultdict(set)
+        # stream_id -> connection timestamp
+        self.users_connect_time: Dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def _generate_stream_id(self) -> str:
+        return str(uuid.uuid4())
+
+    def add_connection(self, user_id: int, stream: queue.Queue, event_type: str) -> str:
+        with self._lock:
+            user_conns = self.user_connections[user_id]
+            if len(user_conns) >= self.max_connections:
+                # Evict the oldest connection
+                oldest_sid = min(
+                    user_conns,
+                    key=lambda sid: self.users_connect_time.get(sid, 0),
+                )
+                self._remove_connection_locked(user_id, oldest_sid, event_type)
+
+            stream_id = self._generate_stream_id()
+            self.user_connections[user_id][stream_id] = stream
+            self.users_connect_time[stream_id] = time.time()
+            self.eventtype_connection_users[event_type].add(user_id)
+            return stream_id
+
+    def _remove_connection_locked(self, user_id: int, stream_id: str, event_type: str):
+        """Remove one connection; must be called *with* self._lock held."""
+        user_conns = self.user_connections.get(user_id)
+        if user_conns and stream_id in user_conns:
+            del user_conns[stream_id]
+        self.users_connect_time.pop(stream_id, None)
+        if not self.user_connections.get(user_id):
+            self.user_connections.pop(user_id, None)
+            self.eventtype_connection_users[event_type].discard(user_id)
+
+    def remove_connection(self, user_id: int, stream_id: str, event_type: str):
+        with self._lock:
+            self._remove_connection_locked(user_id, stream_id, event_type)
+
+    def remove_all_connections(self, user_id: int):
+        """Remove all connections belonging to ``user_id``.
+
+        Bug fix: the original code tried ``stream_id.startswith(str(user_id))``
+        to find connect-times to purge, but stream_id is a UUID and can never
+        start with a numeric user_id.  We now track and delete the exact set of
+        stream_ids we are removing.
+        """
+        with self._lock:
+            if user_id not in self.user_connections:
+                return
+            stream_ids = list(self.user_connections[user_id].keys())
+            del self.user_connections[user_id]
+            for sid in stream_ids:
+                self.users_connect_time.pop(sid, None)
+            for event_type in self.eventtype_connection_users:
+                self.eventtype_connection_users[event_type].discard(user_id)
+
+    def get_user_streams(self, user_id: int) -> Set[queue.Queue]:
+        with self._lock:
+            return set(self.user_connections.get(user_id, {}).values())
+
+    def get_all_streams(self) -> Set[queue.Queue]:
+        with self._lock:
+            all_streams: Set[queue.Queue] = set()
+            for conns in self.user_connections.values():
+                all_streams.update(conns.values())
+            return all_streams
+
+    def get_eventtype_users(self, event_type: str) -> Set[int]:
+        with self._lock:
+            return set(self.eventtype_connection_users.get(event_type, set()))
+
+
+# ---------------------------------------------------------------------------
+# EventManager
+# ---------------------------------------------------------------------------
+
 class EventManager:
-    def __init__(self, dbmgr:DbMgr, max_queue_size=1000, max_client_events=100):
+    """Central SSE event queue, distribution, persistence, and recovery manager.
+
+    Lifecycle
+    ---------
+    1. ``__init__`` -> clean up stale DB entries, start distributor + cleanup threads.
+    2. ``create_event`` -> persist to DB; if user is online, enqueue for
+       immediate delivery; otherwise the event waits in DB until reconnect.
+    3. ``register_user_stream`` -> recover unread events from DB into the new stream.
+    4. ``shutdown`` -> persist any queued-but-unsent events, then stop threads.
+    """
+
+    _event_classes: Dict[str, type[EventBase]] = {}
+
+    def __init__(
+        self,
+        dbmgr: DbMgr,
+        max_event_queue_size: int = 1000,
+        max_events_per_stream: int = 100,
+    ):
         self.mylogger = log.get_logger(self.__class__.__name__, level=logging.INFO)
-        self.dbmgr:DbMgr = dbmgr
-        self.global_event_queue: queue.Queue = queue.Queue(maxsize=max_queue_size)
-        self.user_event_queues: dict[int, queue.Queue] = {}
-        self.active_user_streams: dict[int, Set[queue.Queue]] = {}
-        self.max_client_events = max_client_events
+        self.dbmgr = dbmgr
+        self.connection_manager = ConnectionManager()
+        self.event_queue: queue.Queue[EventBase] = queue.Queue(maxsize=max_event_queue_size)
+        self.max_events_per_stream = max_events_per_stream
         self.lock = threading.Lock()
         self.is_shutting_down = False
         self._recover_stored_events()
-        self.distributor_thread = self.start_event_distributor()
+        self.distributor_thread = self._start_event_distributor()
+        self.cleanup_thread = self._start_cleanup_scheduler()
 
-    @property
-    def all_event_queues(self)->list[queue.Queue]:
-        return list(self.user_event_queues.values()).insert(0, self.global_event_queue)
+    # ------------------------------------------------------------------
+    # Registration
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def register_event(cls, event_class: type[EventBase]):
+        """Register an event class.  ``event_type`` is derived from the class
+        name by stripping the trailing ``Event`` suffix."""
+        event_type = event_class.__name__.removesuffix('Event')
+        cls._event_classes[event_type] = event_class
+
+    # ------------------------------------------------------------------
+    # Event creation
+    # ------------------------------------------------------------------
+
+    def create_event(
+        self,
+        event_type: str,
+        target_userid: int,
+        priority: EventPriority = EventPriority.NORMAL,
+        expire_after: int = None,           # minutes
+        **payload_kwargs,
+    ) -> EventBase:
+        event_class = self._event_classes.get(event_type)
+        if not event_class:
+            raise ValueError(f"Unregistered event type: {event_type!r}")
+
+        expired_at = (
+            datetime.now(timezone.utc) + timedelta(minutes=expire_after)
+            if expire_after else None
+        )
+        event = event_class(
+            target_userid=target_userid,
+            priority=priority,
+            expired_at=expired_at,
+            **payload_kwargs,
+        )
+        self._store_event(event)
+
+        # Only enqueue for immediate delivery when the user is online
+        if target_userid in self.connection_manager.user_connections:
+            try:
+                self._put_event(event)
+            except queue.Full:
+                self.mylogger.error(
+                    f"Event queue full  event {event.id} for user {target_userid} dropped!"
+                )
+                event = None
+        else:
+            self.mylogger.debug(
+                f"User {target_userid} offline; event {event.id} stored for later recovery."
+            )
+        return event
+
+    def _put_event(self, event: EventBase):
+        with self.lock:
+            self.event_queue.put(event)
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def _store_event(self, event: EventBase):
+        with self.dbmgr.session_context() as session:
+            entity = event.to_entity()
+            if entity:
+                session.add(entity)
+                session.flush()          # assign DB id before commit
+                event.id = entity.id
+                session.commit()
+
+    def set_event_read(self, event: EventBase):
+        event.is_read = True
+        with self.dbmgr.session_context() as session:
+            entity = session.query(EventEntity).filter_by(id=event.id).one_or_none()
+            if entity:
+                entity.is_read = True
+
+    # ------------------------------------------------------------------
+    # Startup recovery
+    # ------------------------------------------------------------------
 
     def _recover_stored_events(self):
+        """On startup, delete expired and already-read events from the DB."""
         with self.dbmgr.session_context() as session:
-            stmt = select(EventEntity).where(EventEntity.is_expired() == False).order_by(EventEntity.created_at.asc())
-            unprocessed_events: list[EventEntity] = session.execute(stmt).scalars().all()
-            for event_record in unprocessed_events:
+            stmt = select(EventEntity).where(
+                (EventEntity.is_expired == True) | (EventEntity.is_read == True)
+            )
+            stale = session.execute(stmt).scalars().all()
+            for entity in stale:
+                session.delete(entity)
+            if stale:
+                session.commit()
+
+    def _recover_user_events(self, user_id: int, event_type: str):
+        """Push unread DB events for ``user_id`` into their newly opened stream."""
+        with self.dbmgr.session_context() as session:
+            stmt = (
+                select(EventEntity)
+                .where(
+                    EventEntity.target_userid == user_id,
+                    EventEntity.event_type == event_type,
+                    EventEntity.is_read == False,
+                )
+                .order_by(EventEntity.priority.desc(), EventEntity.created_at.asc())
+            )
+            pending = session.execute(stmt).scalars().all()
+            user_streams = self.connection_manager.get_user_streams(user_id)
+            recovered = 0
+            for entity in pending:
                 try:
-                    if event_record.is_global:
-                        self.global_event_queue.put_nowait(event_record.__dict__)
-                    else:
-                        self.user_event_queues[event_record.user_id].put_nowait(event_record.__dict__)
-                except queue.Full:
-                    break
+                    if entity.is_expired:
+                        session.delete(entity)
+                        continue
+                    event_cls = self._event_classes.get(entity.event_type)
+                    if not event_cls:
+                        self.mylogger.warning(f"Unknown event type in DB: {entity.event_type!r}")
+                        continue
+                    event = event_cls.from_entity(entity)
+                    if event:
+                        event.is_recovered = True
+                        recovered += 1
+                        for stream in user_streams:
+                            try:
+                                stream.put_nowait(event) if stream.qsize() < self.max_events_per_stream \
+                                    else (stream.get_nowait(), stream.put_nowait(event))
+                            except queue.Full:
+                                pass
+                except Exception as exc:
+                    self.mylogger.error(
+                        f"Error recovering event {entity.id} for user {user_id}: {exc}"
+                    )
+            session.commit()
+            if recovered:
+                self.mylogger.debug(f"Recovered {recovered} events for user {user_id}.")
+
+    # ------------------------------------------------------------------
+    # Distribution
+    # ------------------------------------------------------------------
+
+    def _distribute_event(self, event: EventBase):
+        streams = self.connection_manager.get_user_streams(event.target_userid)
+        for stream in streams:
+            try:
+                if stream.qsize() < self.max_events_per_stream:
+                    stream.put_nowait(event)
+                else:
+                    stream.get_nowait()
+                    stream.put_nowait(event)
+            except queue.Full:
+                pass
+
+    def _start_event_distributor(self) -> threading.Thread:
+        def distributor():
+            while not self.is_shutting_down:
+                try:
+                    while not self.event_queue.empty():
+                        event: EventBase = self.event_queue.get(timeout=1)
+                        if event.is_read or event.is_expired:
+                            continue
+                        self._distribute_event(event)
+                except queue.Empty:
+                    continue
+                except Exception as exc:
+                    self.mylogger.error(f"Event distribution error: {exc}")
+        t = threading.Thread(name='sse_event_distributor', target=distributor, daemon=True)
+        t.start()
+        return t
+
+    # ------------------------------------------------------------------
+    # Periodic cleanup
+    # ------------------------------------------------------------------
+
+    def clean_up_events(self):
+        """Delete read or expired events from the DB.
+
+        Bug fix: original code used Python ``or`` which evaluates the WHERE
+        clause as a bool (always True).  Corrected to SQLAlchemy bitwise ``|``.
+        """
+        with self.dbmgr.session_context() as session:
+            stmt = select(EventEntity).where(
+                (EventEntity.is_read == True)
+                | (EventEntity.expired_at <= datetime.now(timezone.utc))
+            )
+            to_delete = session.execute(stmt).scalars().all()
+            for entity in to_delete:
+                session.delete(entity)
             session.commit()
 
-    def _distribute_global_event(self, event: dict[Any, Any]):
-        with self.lock:
-            for user_streams in self.active_user_streams.values():
-                for stream in user_streams:
-                    try:
-                        if stream.qsize() < self.max_client_events:
-                            stream.put_nowait(event)
-                    except queue.Full:
-                        stream.get_nowait()
-                        stream.put_nowait(event)
+    def _start_cleanup_scheduler(self, interval_minutes: int = 30) -> threading.Thread:
+        def scheduler():
+            while not self.is_shutting_down:
+                try:
+                    self.clean_up_events()
+                    time.sleep(interval_minutes * 60)
+                except Exception as exc:
+                    self.mylogger.error(f"Event cleanup error: {exc}")
+        t = threading.Thread(name='sse_event_cleanup', target=scheduler, daemon=True)
+        t.start()
+        return t
 
-    def _distribute_user_specific_event(self, event: Dict[Any, Any]):
-        user_id = event.get('user_id')
-        if user_id is None:
-            return
+    # ------------------------------------------------------------------
+    # Stream registration / deregistration
+    # ------------------------------------------------------------------
 
-        with self.lock:
-            if user_id in self.active_user_streams:
-                for stream in self.active_user_streams[user_id]:
-                    try:
-                        if stream.qsize() < self.max_client_events:
-                            stream.put_nowait(event)
-                    except queue.Full:
-                        stream.get_nowait()
-                        stream.put_nowait(event)
+    def register_user_stream(self, user_id: int, event_type: str) -> str | None:
+        """Open a new SSE stream for ``user_id``.
 
-    def _store_event(self, event: dict[str, Any]):
-        with self.dbmgr.session_context() as session:
+        Returns the ``stream_id`` (UUID string) or ``None`` when the connection
+        could not be established.  Use
+        ``connection_manager.user_connections[user_id][stream_id]`` to get the
+        actual ``queue.Queue`` for the streaming generator.
+        """
+        stream: queue.Queue[EventBase] = queue.Queue(maxsize=self.max_events_per_stream)
+        stream_id = self.connection_manager.add_connection(user_id, stream, event_type)
+        if stream_id:
+            self._recover_user_events(user_id, event_type)
+        return stream_id
 
-            session.add(queued_event)
+    def unregister_user_stream(self, user_id: int, stream_id: str, event_type: str):
+        self.connection_manager.remove_connection(user_id, stream_id, event_type)
+
+    # ------------------------------------------------------------------
+    # Shutdown
+    # ------------------------------------------------------------------
 
     def shutdown(self):
         if self.is_shutting_down:
             return
         self.is_shutting_down = True
-        self.mylogger.info("Shutting down event notification system...")
-        for queue in self.all_event_queues:
-            while not queue.empty():
-                try:
-                    event = queue.get_nowait()
+        self.mylogger.info("Shutting down SSE EventManager...")
+        # Persist any events still waiting in the in-memory queue
+        while not self.event_queue.empty():
+            try:
+                event: EventBase = self.event_queue.get_nowait()
+                if not event.is_read and not event.is_expired:
                     self._store_event(event)
-                except queue.Empty:
-                    break
-        self.mylogger.info("All unprocessed events have been saved")
-
-    def start_event_distributor(self):
-        def distributor():
-            while not self.is_shutting_down:
-                try:
-                    for queue in self.all_event_queues:
-                        while not queue.empty():
-                            event: ServerSideEvent = queue.get(timeout=1)
-                            if event.is_global():
-                                self._distribute_global_event(event)
-                            else:
-                                self._distribute_user_specific_event(event)
-                except queue.Empty:
-                    continue
-                except Exception as e:
-                    self.mylogger.error(f"Event distribution error: {e}")
-
-        distributor_thread = threading.Thread(target=distributor, daemon=True)
-        distributor_thread.start()
-        return distributor_thread
-
-    def register_user_stream(self, user_id: int) -> queue.Queue:
-        with self.lock:
-            user_stream = queue.Queue(maxsize=self.max_client_events)
-            if user_id not in self.active_user_streams:
-                self.active_user_streams[user_id] = set()
-            self.active_user_streams[user_id].add(user_stream)
-            return user_stream
-
-    def unregister_user_stream(self, user_id: int, stream: queue.Queue):
-        with self.lock:
-            if user_id in self.active_user_streams:
-                self.active_user_streams[user_id].discard(stream)
-                if not self.active_user_streams[user_id]:
-                    del self.active_user_streams[user_id]
-
-
-    # def create_event(self, event_type: str, payload: Dict[Any, Any], user_id: int = None, expires_in: int = 3600):
-    #     event = {
-    #         'type': event_type,
-    #         'payload': payload,
-    #         'user_id': user_id,
-    #         'expired_at': (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
-    #     }
-    #     self._store_event(event)
-    #     try:
-    #         self.global_event_queue.put_nowait(event)
-    #     except queue.Full:
-    #         try:
-    #             self.global_event_queue.get_nowait()
-    #             self.global_event_queue.put_nowait(event)
-    #         except:
-    #             pass
-
-class EventFactory:
-    _event_classes: dict[str, type[EventBase]] = {}
-
-    @classmethod
-    def register_event(cls, event_type: str, event_class: type[EventBase]):
-        cls._event_classes[event_type] = event_class
-
-    @classmethod
-    def create_event(cls, event_type: str, payload: PayloadBase,
-                    target_userid: int = None, priority: EventPriority = EventPriority.NORMAL, is_read: bool = False,
-                    created_at: datetime = datetime.now(timezone.utc), expired_at: datetime = None, **kwargs) -> EventBase:
-        if event_type not in cls._event_classes:
-            raise ValueError(f"Unknown event type: {event_type}")
-        event_class = cls._event_classes[event_type]
-        return event_class(event_type=event_type, payload=payload,
-                           target_userid=target_userid, priority=priority, is_read=is_read, created_at=created_at, expired_at=expired_at,
-                           **kwargs)
-
+            except queue.Empty:
+                break
+        # Disconnect all users
+        for uid in list(self.connection_manager.user_connections.keys()):
+            self.connection_manager.remove_all_connections(uid)
+        self.mylogger.info("All unprocessed events saved; connections closed.")
+        self.distributor_thread.join(timeout=10)
+        self.clean_up_events()
+        self.cleanup_thread.join(timeout=10)
+        self.mylogger.info("SSE EventManager shutdown complete.")

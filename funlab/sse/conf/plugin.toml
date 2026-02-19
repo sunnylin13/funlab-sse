@@ -1,0 +1,5 @@
+[SSEService]
+# No mandatory settings. Override defaults via app config.toml if needed.
+# Example:
+#   max_event_queue_size = 1000
+#   max_events_per_stream = 100
