@@ -66,15 +66,32 @@ class SSEService(ServicePlugin):
         # EventEntity no longer carries an ORM-level FK to user.id.
         EventEntity.__table__.create(bind=app.dbmgr.get_db_engine(), checkfirst=True)
         self.sse_mgr = EventManager(app.dbmgr)
-        app.teardown_appcontext(self._teardown)
+        
+        # IMPORTANT: SSE is a daemon service that should persist across ALL requests.
+        # We DO NOT register teardown_appcontext() here, as that would shutdown
+        # the service after every single request.
+        # Instead, SSE will be properly shutdown via unload() when the Flask app
+        # itself shuts down (managed by plugin_manager.cleanup()).
+        
         self._register_routes()
         # Expose this service on the app for use by FunlabFlask helper methods
         app.sse_service = self
-        app.mylogger.info("SSEService activated as SSE_PROVIDER='plugin'.")
+        app.mylogger.info(
+            "SSEService activated as SSE_PROVIDER='plugin'. "
+            "SSE will shutdown when Flask app exits (via plugin lifecycle management)."
+        )
 
     def _teardown(self, _exception):
-        if self._is_active and self.sse_mgr:
-            self.sse_mgr.shutdown()
+        """Teardown callback invoked by Flask at the end of request context.
+        
+        NOTE: This is called once per request, NOT once at application shutdown.
+        We do NOT shut down the EventManager here because it's a daemon service
+        that should persist across multiple requests.
+        
+        The proper shutdown happens in stop_service() which is called by the
+        plugin manager when the Flask application shuts down.
+        """
+        pass  # Do NOT shutdown SSE here - this is per-request cleanup only
 
     # ------------------------------------------------------------------
     # Public notification helpers (mirror FunlabFlask methods)
@@ -123,10 +140,40 @@ class SSEService(ServicePlugin):
     # ServicePlugin lifecycle stubs
     # ------------------------------------------------------------------
 
-    def start_service(self): pass
-    def stop_service(self): pass
-    def restart_service(self): self.stop_service(); self.start_service()
-    def reload_service(self): pass
+    def start_service(self):
+        """Called when service is started (usually at app startup)."""
+        if self._is_active and self.sse_mgr:
+            self.app.mylogger.info(f"{self.name}: start_service()")
+    
+    def stop_service(self):
+        """Called when service is stopped (at app shutdown).
+        
+        This is where SSE gracefully shuts down all resources.
+        """
+        if self._is_active and self.sse_mgr:
+            self.app.mylogger.info(f"{self.name}: stop_service() - shutting down EventManager")
+            self.sse_mgr.shutdown()
+            self.sse_mgr = None
+            self.app.mylogger.info(f"{self.name}: stop_service() complete")
+    
+    def restart_service(self):
+        """Restart the service."""
+        self.stop_service()
+        self.start_service()
+    
+    def reload_service(self):
+        """Reload service configuration."""
+        pass
+
+    def unload(self):
+        """Called by plugin manager when the Flask app shuts down.
+        
+        This ensures SSE is properly cleaned up when the application exits,
+        not after every single request (which was the problem with teardown_appcontext).
+        """
+        self.app.mylogger.info(f"{self.name}: unload() - plugin shutdown initiated")
+        self.stop_service()
+        self.app.mylogger.info(f"{self.name}: unload() complete")
 
     # ------------------------------------------------------------------
     # Route registration
