@@ -154,7 +154,7 @@ class EventBase(_Readable):
             event_type=self.event_type,
             payload=self.payload.to_json(),
             target_userid=self.target_userid,
-            priority=self.priority,
+            priority=self.priority.name if isinstance(self.priority, EventPriority) else self.priority,
             expired_at=self.expired_at,
         )
         entity.is_read = self.is_read
@@ -175,9 +175,14 @@ class EventBase(_Readable):
             if isinstance(entity.payload, str)
             else entity.payload
         )
+        # Convert priority string to enum if needed
+        priority = (
+            EventPriority[entity.priority] if isinstance(entity.priority, str)
+            else entity.priority
+        )
         event = cls(
             target_userid=entity.target_userid,
-            priority=entity.priority,
+            priority=priority,
             expired_at=entity.expired_at,
             payload=payload_obj,
         )
@@ -224,8 +229,17 @@ class EventEntity(EventBase):
         metadata={'sa': Column(Integer, nullable=True)},
     )
     priority: EventPriority = field(
-        default=None,
-        metadata={'sa': Column(SQLEnum(EventPriority), default=EventPriority.NORMAL, nullable=False)},
+        default=EventPriority.NORMAL,
+        metadata={'sa': Column(
+            SQLEnum(
+                'LOW', 'NORMAL', 'HIGH', 'CRITICAL',
+                name='eventpriority',
+                create_constraint=False,
+                native_enum=True
+            ),
+            default='NORMAL',
+            nullable=False
+        )},
     )
     is_read: bool = field(
         init=False,

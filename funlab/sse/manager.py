@@ -146,9 +146,18 @@ class EventManager:
         self.max_events_per_stream = max_events_per_stream
         self.lock = threading.Lock()
         self.is_shutting_down = False
+        self.mylogger.info(
+            f"EventManager.__init__ starting "
+            f"(max_queue={max_event_queue_size}, max_per_stream={max_events_per_stream})"
+        )
         self._recover_stored_events()
         self.distributor_thread = self._start_event_distributor()
         self.cleanup_thread = self._start_cleanup_scheduler()
+        self.mylogger.info(
+            f"EventManager.__init__ complete: "
+            f"distributor_thread={self.distributor_thread.name}, "
+            f"cleanup_thread={self.cleanup_thread.name}"
+        )
 
     # ------------------------------------------------------------------
     # Registration
@@ -378,9 +387,20 @@ class EventManager:
 
     def shutdown(self):
         if self.is_shutting_down:
+            self.mylogger.debug("shutdown() already in progress, skipping")
             return
         self.is_shutting_down = True
+        
+        import traceback
+        caller_stack = ''.join(traceback.format_stack()[-5:-1])
+        self.mylogger.info(
+            f"[SHUTDOWN] EventManager.shutdown() called from:\n{caller_stack}"
+        )
+        
         self.mylogger.info("Shutting down SSE EventManager...")
+        queued_events = self.event_queue.qsize()
+        self.mylogger.info(f"  Queued events to persist: {queued_events}")
+        
         # Persist any events still waiting in the in-memory queue
         while not self.event_queue.empty():
             try:
@@ -389,11 +409,29 @@ class EventManager:
                     self._store_event(event)
             except queue.Empty:
                 break
+        
         # Disconnect all users
+        disconnected_count = len(list(self.connection_manager.user_connections.keys()))
+        self.mylogger.info(f"  Disconnecting {disconnected_count} connected users...")
         for uid in list(self.connection_manager.user_connections.keys()):
             self.connection_manager.remove_all_connections(uid)
+        
         self.mylogger.info("All unprocessed events saved; connections closed.")
+        
+        self.mylogger.info(f"  Waiting for distributor_thread ({self.distributor_thread.name}) to stop...")
         self.distributor_thread.join(timeout=10)
+        if self.distributor_thread.is_alive():
+            self.mylogger.warning(f"  distributor_thread still alive after timeout (daemon)")
+        else:
+            self.mylogger.info(f"  distributor_thread stopped successfully")
+        
         self.clean_up_events()
+        
+        self.mylogger.info(f"  Waiting for cleanup_thread ({self.cleanup_thread.name}) to stop...")
         self.cleanup_thread.join(timeout=10)
+        if self.cleanup_thread.is_alive():
+            self.mylogger.warning(f"  cleanup_thread still alive after timeout (daemon)")
+        else:
+            self.mylogger.info(f"  cleanup_thread stopped successfully")
+        
         self.mylogger.info("SSE EventManager shutdown complete.")
