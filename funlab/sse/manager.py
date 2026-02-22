@@ -26,6 +26,36 @@ from .model import EventBase, EventEntity, EventPriority
 
 
 # ---------------------------------------------------------------------------
+# Lightweight ephemeral event (no DB, no class registry)
+# ---------------------------------------------------------------------------
+
+class RawEventMessage:
+    """Minimal event wrapper for ephemeral / real-time events (e.g. price ticks)
+    that do **not** need DB persistence or a registered EventBase subclass.
+
+    The SSE stream handler only needs ``.event_type`` and ``.to_dict()``,
+    so this lightweight object is fully compatible.
+    """
+
+    __slots__ = ('event_type', '_data')
+
+    def __init__(self, event_type: str, target_userid: int, payload: dict, priority: str = 'NORMAL'):
+        self.event_type = event_type
+        self._data = {
+            'id': None,
+            'event_type': event_type,
+            'priority': priority.upper(),
+            'target_userid': target_userid,
+            'created_at': datetime.now(timezone.utc).isoformat(),
+            'payload': payload,
+            'is_recovered': False,
+        }
+
+    def to_dict(self) -> dict:
+        return self._data
+
+
+# ---------------------------------------------------------------------------
 # ConnectionManager
 # ---------------------------------------------------------------------------
 
@@ -213,13 +243,39 @@ class EventManager:
             )
         return event
 
-    def _put_event(self, event: EventBase):
+    def _put_event(self, event):
         with self.lock:
             self.event_queue.put(event)
 
-    # ------------------------------------------------------------------
-    # Persistence
-    # ------------------------------------------------------------------
+    def send_raw_event(
+        self,
+        event_type: str,
+        target_userid: int,
+        payload: dict,
+        priority: str = 'NORMAL',
+    ) -> bool:
+        """Send an ephemeral, non-persistent event to a connected user.
+
+        Unlike ``create_event``, this method:
+        - Does **not** require a registered EventBase subclass
+        - Does **not** persist the event to the database
+        - Is suitable for real-time push data (price ticks, live updates)
+
+        Returns True if the event was enqueued, False if the user is offline.
+        """
+        if target_userid not in self.connection_manager.user_connections:
+            return False
+        raw = RawEventMessage(event_type, target_userid, payload, priority)
+        try:
+            self.event_queue.put_nowait(raw)
+            return True
+        except queue.Full:
+            self.mylogger.warning(
+                f"Event queue full — raw event type={event_type!r} for user={target_userid} dropped"
+            )
+            return False
+
+
 
     def _store_event(self, event: EventBase):
         with self.dbmgr.session_context() as session:
