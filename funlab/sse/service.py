@@ -1,11 +1,10 @@
 ﻿"""
-SSEService    funlab-sse plugin
+SSEService  —  funlab-sse plugin
 
-When ``SSE_PROVIDER = 'plugin'`` is set in config.toml this service takes over
-all SSE responsibilities from funlab-flaskr's built-in implementation:
+Install this package and the service activates automatically, replacing
+``PollingNotificationProvider`` in funlab-flaskr with a full SSE back-end.
 
-  Routes registered (same URLs as the built-in implementation so the frontend
-  and templates remain unchanged):
+  Routes registered by this plugin:
 
     GET  /sse/<event_type>              SSE streaming endpoint
     POST /mark_event_read/<event_id>    Mark a single event as read
@@ -13,14 +12,19 @@ all SSE responsibilities from funlab-flaskr's built-in implementation:
     POST /generate_notification         Test / programmatic event injection
     GET  /ssetest                       (Admin) SSE test page
 
-  Public helper methods on the service instance:
+  The ``/notifications/*`` routes (poll / clear / dismiss) remain on the
+  root blueprint registered by funlab-flaskr and automatically delegate to
+  this service via ``current_app.notification_provider``.
 
-    send_user_system_notification(...)
-    send_all_users_system_notification(...)
+  Public interface  (INotificationProvider):
 
-When ``SSE_PROVIDER = 'builtin'`` (the default) this service loads but stays
-entirely passive  no routes, no EventManager  so the built-in code continues
-to operate without interference.
+    send_user_notification(title, message, target_userid, priority, expire_after)
+    send_global_notification(title, message, priority, expire_after)
+    fetch_unread(user_id) -> list[dict]
+    dismiss_items(user_id, item_ids)
+    dismiss_all(user_id)
+    send_event(event_type, target_userid, payload, priority) -> bool
+    get_connected_users(event_type) -> set
 """
 from __future__ import annotations
 
@@ -35,28 +39,23 @@ from flask import (
 )
 from flask_login import current_user, login_required
 from funlab.core.auth import admin_required
+from funlab.core.notification import INotificationProvider
 from funlab.core.plugin import ServicePlugin
 
 from .manager import EventManager
 from .model import EventBase, EventEntity, EventPriority, SystemNotificationEvent
 
 
-class SSEService(ServicePlugin):
+class SSEService(ServicePlugin, INotificationProvider):
     """SSE plugin that can act as a drop-in replacement for funlab-flaskr's
     built-in SSE implementation."""
 
     def __init__(self, app):
         super().__init__(app)
-        self._provider = app.config.get('SSE_PROVIDER', 'builtin')
-        if self._is_active:
-            self._setup(app)
-
-    @property
-    def _is_active(self) -> bool:
-        return self._provider == 'plugin'
+        self._setup(app)
 
     # ------------------------------------------------------------------
-    # Setup (only when SSE_PROVIDER = 'plugin')
+    # Setup
     # ------------------------------------------------------------------
 
     def _setup(self, app):
@@ -66,28 +65,30 @@ class SSEService(ServicePlugin):
         # EventEntity no longer carries an ORM-level FK to user.id.
         EventEntity.__table__.create(bind=app.dbmgr.get_db_engine(), checkfirst=True)
         self.sse_mgr = EventManager(app.dbmgr)
-        
+
         # IMPORTANT: SSE is a daemon service that should persist across ALL requests.
         # We DO NOT register teardown_appcontext() here, as that would shutdown
         # the service after every single request.
         # Instead, SSE will be properly shutdown via unload() when the Flask app
         # itself shuts down (managed by plugin_manager.cleanup()).
-        
+
         self._register_routes()
-        # Expose this service on the app for use by FunlabFlask helper methods
-        app.sse_service = self
+        # Register this service as the app's notification provider.
+        # All calls to app.send_user_notification / send_global_notification and
+        # the /notifications/* HTTP routes will now delegate to SSEService.
+        app.set_notification_provider(self)
         app.mylogger.info(
-            "SSEService activated as SSE_PROVIDER='plugin'. "
+            "SSEService activated: replaced PollingNotificationProvider. "
             "SSE will shutdown when Flask app exits (via plugin lifecycle management)."
         )
 
     def _teardown(self, _exception):
         """Teardown callback invoked by Flask at the end of request context.
-        
+
         NOTE: This is called once per request, NOT once at application shutdown.
         We do NOT shut down the EventManager here because it's a daemon service
         that should persist across multiple requests.
-        
+
         The proper shutdown happens in stop_service() which is called by the
         plugin manager when the Flask application shuts down.
         """
@@ -97,44 +98,138 @@ class SSEService(ServicePlugin):
     # Public notification helpers (mirror FunlabFlask methods)
     # ------------------------------------------------------------------
 
-    def send_user_system_notification(
+    @staticmethod
+    def _normalize_priority(priority) -> EventPriority:
+        """Accept both plain strings ('NORMAL', 'HIGH') and EventPriority enums."""
+        if isinstance(priority, EventPriority):
+            return priority
+        try:
+            return EventPriority[str(priority).upper()]
+        except KeyError:
+            return EventPriority.NORMAL
+
+    def send_event(
+        self,
+        event_type: str,
+        target_userid: int,
+        payload: dict,
+        priority: str = 'NORMAL',
+        expire_after: int = None,
+    ) -> bool:
+        """Send an ephemeral, non-persistent event to a connected user.
+
+        Designed for plugins that want to push real-time data without depending
+        on EventBase / EventPriority.  Events sent here are **not** persisted to
+        the database; suitable for live ticks and transient updates.
+
+        Returns True if the event was enqueued for the online user, False otherwise.
+        """
+        return self.sse_mgr.send_raw_event(
+            event_type=event_type,
+            target_userid=target_userid,
+            payload=payload,
+            priority=str(priority).upper(),
+        )
+
+    def send_user_notification(
         self,
         title: str,
         message: str,
         target_userid: int = None,
-        priority: EventPriority = EventPriority.NORMAL,
+        priority: 'str | EventPriority' = 'NORMAL',
         expire_after: int = None,
     ) -> EventBase | None:
-        if not self._is_active:
-            return None
+        """Send a SystemNotification event to *target_userid* (persisted to DB)."""
         return self.sse_mgr.create_event(
             event_type='SystemNotification',
             target_userid=target_userid,
-            priority=priority,
+            priority=self._normalize_priority(priority),
             expire_after=expire_after,
             title=title,
             message=message,
         )
 
-    def send_all_users_system_notification(
+    # Backward-compatibility alias
+    send_user_system_notification = send_user_notification
+
+    def send_global_notification(
         self,
         title: str,
         message: str,
-        priority: EventPriority = EventPriority.NORMAL,
+        priority: 'str | EventPriority' = 'NORMAL',
         expire_after: int = None,
     ):
-        if not self._is_active:
-            return
+        """Broadcast a SystemNotification event to all currently-connected users."""
         online_users = self.sse_mgr.connection_manager.get_eventtype_users('SystemNotification')
         for uid in online_users:
             self.sse_mgr.create_event(
                 event_type='SystemNotification',
                 target_userid=uid,
-                priority=priority,
+                priority=self._normalize_priority(priority),
                 expire_after=expire_after,
                 title=title,
                 message=message,
             )
+
+    # Backward-compatibility alias
+    send_all_users_system_notification = send_global_notification
+
+    def get_connected_users(self, event_type: str) -> set:
+        """Return the set of user_ids currently subscribed to *event_type*."""
+        return self.sse_mgr.connection_manager.get_eventtype_users(event_type)
+
+    def fetch_unread(self, user_id: int) -> list[dict]:
+        """Return all unread / unexpired DB events for *user_id* as dicts.
+
+        Used by the ``/notifications/poll`` fallback endpoint when SSE is active
+        (e.g. after a page reload before the SSE stream reconnects).
+        """
+        from sqlalchemy import select
+        with self.app.dbmgr.session_context() as session:
+            stmt = (
+                select(EventEntity)
+                .where(
+                    EventEntity.target_userid == user_id,
+                    EventEntity.is_read == False,
+                )
+                .order_by(EventEntity.created_at.asc())
+            )
+            entities = session.execute(stmt).scalars().all()
+            result = []
+            for entity in entities:
+                if entity.is_expired:
+                    continue
+                event_cls = self.sse_mgr._event_classes.get(entity.event_type)
+                if not event_cls:
+                    continue
+                event = event_cls.from_entity(entity)
+                if event:
+                    d = event.to_dict()
+                    d['is_recovered'] = True  # delivered via poll ≠ fresh SSE push
+                    result.append(d)
+            return result
+
+    def dismiss_items(self, user_id: int, item_ids: list[int]) -> None:
+        """Mark specific events as read in the DB for *user_id*."""
+        with self.app.dbmgr.session_context() as session:
+            session.query(EventEntity).filter(
+                EventEntity.id.in_(item_ids),
+                EventEntity.target_userid == user_id,
+            ).update({'is_read': True}, synchronize_session=False)
+            session.commit()
+
+    def dismiss_all(self, user_id: int) -> None:
+        """Mark all unread events as read in the DB for *user_id*."""
+        with self.app.dbmgr.session_context() as session:
+            session.query(EventEntity).filter(
+                EventEntity.target_userid == user_id,
+                EventEntity.is_read == False,
+            ).update({'is_read': True}, synchronize_session=False)
+            session.commit()
+
+    @property
+    def supports_realtime(self) -> bool:
+        return True
 
     # ------------------------------------------------------------------
     # ServicePlugin lifecycle stubs
@@ -142,32 +237,32 @@ class SSEService(ServicePlugin):
 
     def start_service(self):
         """Called when service is started (usually at app startup)."""
-        if self._is_active and self.sse_mgr:
+        if self.sse_mgr:
             self.app.mylogger.info(f"{self.name}: start_service()")
-    
+
     def stop_service(self):
         """Called when service is stopped (at app shutdown).
-        
+
         This is where SSE gracefully shuts down all resources.
         """
-        if self._is_active and self.sse_mgr:
+        if self.sse_mgr:
             self.app.mylogger.info(f"{self.name}: stop_service() - shutting down EventManager")
             self.sse_mgr.shutdown()
             self.sse_mgr = None
             self.app.mylogger.info(f"{self.name}: stop_service() complete")
-    
+
     def restart_service(self):
         """Restart the service."""
         self.stop_service()
         self.start_service()
-    
+
     def reload_service(self):
         """Reload service configuration."""
         pass
 
     def unload(self):
         """Called by plugin manager when the Flask app shuts down.
-        
+
         This ensures SSE is properly cleaned up when the application exits,
         not after every single request (which was the problem with teardown_appcontext).
         """
@@ -285,7 +380,7 @@ class SSEService(ServicePlugin):
                 else EventPriority.NORMAL
             )
             expire_after = request.form.get('expire_after', 5, type=int)
-            event = self.send_user_system_notification(
+            event = self.send_user_notification(
                 title=title,
                 message=message,
                 target_userid=target_userid,
