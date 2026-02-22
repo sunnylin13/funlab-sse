@@ -139,11 +139,12 @@ class SSEClient {
             return Promise.reject(new Error('Invalid eventId'));
         }
 
-        return fetch(`/mark_event_read/${eventId}`, {
+        return fetch('/notifications/dismiss', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-            }
+            },
+            body: JSON.stringify({ ids: [eventId] })
         })
         .then(response => {
             if (this.options.debug) {
@@ -183,12 +184,12 @@ class SSEClient {
             return Promise.reject(new Error('Invalid eventIds'));
         }
 
-        return fetch(`/mark_events_read`, {
+        return fetch('/notifications/dismiss', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ event_ids: eventIds })
+            body: JSON.stringify({ ids: eventIds })
         })
         .then(response => {
             if (this.options.debug) {
