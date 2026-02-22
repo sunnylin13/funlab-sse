@@ -2,7 +2,7 @@
 *-py3-none-any/
 *-py3-none-any.*
 .data/
-docs/
+# docs/
 out/
 web_source/
 # 不可用 dist/, 只有目前目錄下的dist, 因在static\assets\vendor ... 下有 dist 目錄，會造成 poetry build 未include
