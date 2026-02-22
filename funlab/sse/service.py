@@ -7,8 +7,6 @@ Install this package and the service activates automatically, replacing
   Routes registered by this plugin:
 
     GET  /sse/<event_type>              SSE streaming endpoint
-    POST /mark_event_read/<event_id>    Mark a single event as read
-    POST /mark_events_read              Bulk mark-as-read
     POST /generate_notification         Test / programmatic event injection
     GET  /ssetest                       (Admin) SSE test page
 
@@ -72,8 +70,10 @@ class SSEService(ServicePlugin, INotificationProvider):
         # Instead, SSE will be properly shutdown via unload() when the Flask app
         # itself shuts down (managed by plugin_manager.cleanup()).
 
-        self._register_routes()
         # Register this service as the app's notification provider.
+        # SSE-specific routes will be registered when FunlabFlask calls
+        # app.notification_provider.register_routes(blueprint).
+        #
         # All calls to app.send_user_notification / send_global_notification and
         # the /notifications/* HTTP routes will now delegate to SSEService.
         app.set_notification_provider(self)
@@ -271,19 +271,23 @@ class SSEService(ServicePlugin, INotificationProvider):
         self.app.mylogger.info(f"{self.name}: unload() complete")
 
     # ------------------------------------------------------------------
-    # Route registration
+    # Route registration (INotificationProvider.register_routes implementation)
     # ------------------------------------------------------------------
 
-    def _register_routes(self):
-        """Add SSE routes to the plugin blueprint.
+    def register_routes(self, blueprint) -> None:
+        """Register SSE-specific routes: ``/sse/*``, ``/generate_notification``, ``/ssetest``.
 
-        The blueprint is registered with ``url_prefix=''`` so the paths match
-        the built-in implementation exactly.
+        This implements :meth:`~funlab.core.notification.INotificationProvider.register_routes`
+        to register provider-specific endpoints.
+
+        **Note:** Event dismissal (marking as read) is now unified via the generic
+        ``POST /notifications/dismiss`` endpoint handled by FunlabFlask. This eliminates
+        redundant ``/mark_event_read`` and ``/mark_events_read`` routes.
         """
         # Override the default blueprint prefix to mount at root
-        self.blueprint.url_prefix = ''
+        blueprint.url_prefix = ''
 
-        @self.blueprint.route('/sse/<event_type>')
+        @blueprint.route('/sse/<event_type>')
         @login_required
         def stream_events(event_type):
             user_id = current_user.id
@@ -324,80 +328,3 @@ class SSEService(ServicePlugin, INotificationProvider):
                 content_type='text/event-stream',
             )
 
-        @self.blueprint.route('/mark_event_read/<int:event_id>', methods=['POST'])
-        @login_required
-        def mark_event_read(event_id):
-            try:
-                from .model import EventEntity
-                with self.app.dbmgr.session_context() as session:
-                    entity = session.query(EventEntity).filter_by(
-                        id=event_id,
-                        target_userid=current_user.id,
-                    ).first()
-                    if not entity:
-                        return jsonify({"status": "error", "message": "Not found or access denied"}), 404
-                    if entity.is_read:
-                        return jsonify({"status": "warning", "message": "Already read"}), 200
-                    entity.is_read = True
-                    session.commit()
-                return jsonify({"status": "success", "message": "Event marked as read"}), 200
-            except Exception as exc:
-                logging.error(f"mark_event_read error: {exc}")
-                return jsonify({"status": "error", "message": "Internal server error"}), 500
-
-        @self.blueprint.route('/mark_events_read', methods=['POST'])
-        @login_required
-        def mark_events_read():
-            data = request.get_json()
-            event_ids = data.get('event_ids') if data else None
-            if not event_ids or not isinstance(event_ids, list):
-                return jsonify({"status": "error", "message": "Invalid or missing event_ids"}), 400
-            try:
-                from .model import EventEntity
-                with self.app.dbmgr.session_context() as session:
-                    updated = session.query(EventEntity).filter(
-                        EventEntity.id.in_(event_ids),
-                        EventEntity.target_userid == current_user.id,
-                        EventEntity.is_read == False,
-                    ).update({'is_read': True}, synchronize_session=False)
-                    session.commit()
-                return jsonify({"status": "success", "message": f"{updated} events marked as read"}), 200
-            except Exception as exc:
-                logging.error(f"mark_events_read error: {exc}")
-                return jsonify({"status": "error", "message": "Internal server error"}), 500
-
-        @self.blueprint.route('/generate_notification', methods=['POST'])
-        @login_required
-        def generate_notification():
-            title = request.form.get('title', 'Test Notification')
-            message = request.form.get('message', 'This is a test notification.')
-            target_user = request.form.get('target_userid', None)
-            target_userid = int(target_user) if target_user else current_user.id
-            priority_level = request.form.get('priority', 'NORMAL')
-            priority = (
-                EventPriority[priority_level]
-                if priority_level in EventPriority.__members__
-                else EventPriority.NORMAL
-            )
-            expire_after = request.form.get('expire_after', 5, type=int)
-            event = self.send_user_notification(
-                title=title,
-                message=message,
-                target_userid=target_userid,
-                priority=priority,
-                expire_after=expire_after,
-            )
-            if event:
-                return jsonify({
-                    "status": "success",
-                    "event_id": event.id,
-                    "event_type": event.event_type,
-                    "created_at": event.created_at.isoformat(),
-                }), 201
-            return jsonify({"status": "error", "message": "Failed to create notification"}), 500
-
-        @self.blueprint.route('/ssetest')
-        @login_required
-        @admin_required
-        def ssetest():
-            return render_template('ssetest.html')
