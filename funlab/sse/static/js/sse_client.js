@@ -215,5 +215,5 @@ class SSEClient {
     }
 }
 
-// Global instance
-const sseClient = new SSEClient({ debug: true });
+// Global instance - exposed to window for use by other scripts
+window.sseClient = new SSEClient({ debug: true });

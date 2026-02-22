@@ -64,6 +64,9 @@ class SSEService(ServicePlugin, INotificationProvider):
         EventEntity.__table__.create(bind=app.dbmgr.get_db_engine(), checkfirst=True)
         self.sse_mgr = EventManager(app.dbmgr)
 
+        # Register SSE routes on our own blueprint
+        self._register_sse_routes()
+
         # IMPORTANT: SSE is a daemon service that should persist across ALL requests.
         # We DO NOT register teardown_appcontext() here, as that would shutdown
         # the service after every single request.
@@ -274,20 +277,17 @@ class SSEService(ServicePlugin, INotificationProvider):
     # Route registration (INotificationProvider.register_routes implementation)
     # ------------------------------------------------------------------
 
-    def register_routes(self, blueprint) -> None:
-        """Register SSE-specific routes: ``/sse/*``, ``/generate_notification``, ``/ssetest``.
+    def _register_sse_routes(self) -> None:
+        """Register SSE streaming routes on this plugin's own blueprint.
 
-        This implements :meth:`~funlab.core.notification.INotificationProvider.register_routes`
-        to register provider-specific endpoints.
-
-        **Note:** Event dismissal (marking as read) is now unified via the generic
-        ``POST /notifications/dismiss`` endpoint handled by FunlabFlask. This eliminates
-        redundant ``/mark_event_read`` and ``/mark_events_read`` routes.
+        This is called during _setup() to ensure routes are registered before
+        the blueprint is registered with Flask.
         """
-        # Override the default blueprint prefix to mount at root
-        blueprint.url_prefix = ''
+        self.app.mylogger.info(f"[SSEService] Registering SSE routes on own blueprint: {self.blueprint.name}")
 
-        @blueprint.route('/sse/<event_type>')
+        # Register on own blueprint (sse_bp), which has url_prefix='/sse'
+        # So /SystemNotification becomes /sse/SystemNotification
+        @self.blueprint.route('/<event_type>')
         @login_required
         def stream_events(event_type):
             user_id = current_user.id
@@ -327,4 +327,22 @@ class SSEService(ServicePlugin, INotificationProvider):
                 stream_with_context(event_stream()),
                 content_type='text/event-stream',
             )
+
+    def register_routes(self, blueprint) -> None:
+        """Register SSE-specific routes.
+
+        This implements :meth:`~funlab.core.notification.INotificationProvider.register_routes`.
+
+        **Note:** SSE routes are now registered directly on the SSE plugin's own blueprint
+        in `_register_sse_routes()` during `_setup()`. This method is kept for interface
+        compatibility but is essentially a no-op since routes are already registered.
+
+        Event dismissal is unified via the generic ``POST /notifications/dismiss`` endpoint
+        handled by FunlabFlask.
+        """
+        # Routes already registered on own blueprint during _setup()
+        self.app.mylogger.debug(
+            f"[SSEService] register_routes called (no-op: routes already registered on {self.blueprint.name})"
+        )
+        pass
 
