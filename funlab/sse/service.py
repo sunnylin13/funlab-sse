@@ -38,13 +38,13 @@ from flask import (
 from flask_login import current_user, login_required
 from funlab.core.auth import admin_required
 from funlab.core.notification import INotificationProvider
-from funlab.core.plugin import ServicePlugin
+from funlab.core.enhanced_plugin import EnhancedServicePlugin
 
 from .manager import EventManager
 from .model import EventBase, EventEntity, EventPriority, SystemNotificationEvent
 
 
-class SSEService(ServicePlugin, INotificationProvider):
+class SSEService(EnhancedServicePlugin, INotificationProvider):
     """SSE plugin that can act as a drop-in replacement for funlab-flaskr's
     built-in SSE implementation."""
 
@@ -70,8 +70,8 @@ class SSEService(ServicePlugin, INotificationProvider):
         # IMPORTANT: SSE is a daemon service that should persist across ALL requests.
         # We DO NOT register teardown_appcontext() here, as that would shutdown
         # the service after every single request.
-        # Instead, SSE will be properly shutdown via unload() when the Flask app
-        # itself shuts down (managed by plugin_manager.cleanup()).
+        # Instead, SSE is properly shut down via unload() → stop() → _on_stop()
+        # when the Flask app itself shuts down (managed by plugin_manager.cleanup()).
 
         # Register this service as the app's notification provider.
         # SSE-specific routes will be registered when FunlabFlask calls
@@ -92,8 +92,8 @@ class SSEService(ServicePlugin, INotificationProvider):
         We do NOT shut down the EventManager here because it's a daemon service
         that should persist across multiple requests.
 
-        The proper shutdown happens in stop_service() which is called by the
-        plugin manager when the Flask application shuts down.
+        The proper shutdown happens via unload() → stop() → _on_stop() when
+        the plugin manager cleans up at Flask application shutdown.
         """
         pass  # Do NOT shutdown SSE here - this is per-request cleanup only
 
@@ -235,42 +235,37 @@ class SSEService(ServicePlugin, INotificationProvider):
         return True
 
     # ------------------------------------------------------------------
-    # ServicePlugin lifecycle stubs
+    # ServicePlugin lifecycle overrides
     # ------------------------------------------------------------------
 
-    def start_service(self):
-        """Called when service is started (usually at app startup)."""
+    def _on_start(self):
+        """Called when the plugin is started (via start())."""
         if self.sse_mgr:
-            self.app.mylogger.info(f"{self.name}: start_service()")
+            self.app.mylogger.info(f"{self.name}: _on_start()")
 
-    def stop_service(self):
-        """Called when service is stopped (at app shutdown).
+    def _on_stop(self):
+        """Called when the plugin is stopped (via stop()).
 
-        This is where SSE gracefully shuts down all resources.
+        Gracefully shuts down all SSE resources.
         """
         if self.sse_mgr:
-            self.app.mylogger.info(f"{self.name}: stop_service() - shutting down EventManager")
+            self.app.mylogger.info(f"{self.name}: _on_stop() - shutting down EventManager")
             self.sse_mgr.shutdown()
             self.sse_mgr = None
-            self.app.mylogger.info(f"{self.name}: stop_service() complete")
+            self.app.mylogger.info(f"{self.name}: _on_stop() complete")
 
-    def restart_service(self):
-        """Restart the service."""
-        self.stop_service()
-        self.start_service()
-
-    def reload_service(self):
-        """Reload service configuration."""
+    def reload(self):
+        """Reload service configuration (no-op for SSE)."""
         pass
 
     def unload(self):
         """Called by plugin manager when the Flask app shuts down.
 
-        This ensures SSE is properly cleaned up when the application exits,
-        not after every single request (which was the problem with teardown_appcontext).
+        Delegates to stop() so the full Enhanced lifecycle is honoured,
+        ensuring _on_stop() / EventManager.shutdown() runs exactly once.
         """
         self.app.mylogger.info(f"{self.name}: unload() - plugin shutdown initiated")
-        self.stop_service()
+        self.stop()
         self.app.mylogger.info(f"{self.name}: unload() complete")
 
     # ------------------------------------------------------------------
