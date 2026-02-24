@@ -152,9 +152,6 @@ class SSEService(EnhancedServicePlugin, INotificationProvider):
             message=message,
         )
 
-    # Backward-compatibility alias
-    send_user_system_notification = send_user_notification
-
     def send_global_notification(
         self,
         title: str,
@@ -173,9 +170,6 @@ class SSEService(EnhancedServicePlugin, INotificationProvider):
                 title=title,
                 message=message,
             )
-
-    # Backward-compatibility alias
-    send_all_users_system_notification = send_global_notification
 
     def get_connected_users(self, event_type: str) -> set:
         """Return the set of user_ids currently subscribed to *event_type*."""
