@@ -29,14 +29,12 @@ from __future__ import annotations
 import json
 import logging
 import queue
-import traceback
 
 from flask import (
-    Blueprint, Response, jsonify, render_template, request,
+    Response,
     stream_with_context,
 )
 from flask_login import current_user, login_required
-from funlab.core.auth import admin_required
 from funlab.core.notification import INotificationProvider
 from funlab.core.enhanced_plugin import EnhancedServicePlugin
 
