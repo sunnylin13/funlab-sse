@@ -21,7 +21,7 @@ from tzlocal import get_localzone
 
 # All application entities share the same registry for cross-package table
 # awareness (FK resolution, joined-table inheritance, etc.)
-from funlab.core.appbase import APP_ENTITIES_REGISTRY as entities_registry
+from funlab.core._entity_registry import APP_ENTITIES_REGISTRY as entities_registry
 
 
 # ---------------------------------------------------------------------------
