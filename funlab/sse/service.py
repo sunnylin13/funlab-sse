@@ -270,7 +270,7 @@ class SSEService(EnhancedServicePlugin, INotificationProvider):
         This is called during _setup() to ensure routes are registered before
         the blueprint is registered with Flask.
         """
-        self.app.mylogger.info(f"[SSEService] Registering SSE routes on own blueprint: {self.blueprint.name}")
+        # self.app.mylogger.info(f"[SSEService] Registering SSE routes on own blueprint: {self.blueprint.name}")
 
         # Register on own blueprint (sse_bp), which has url_prefix='/sse'
         # So /SystemNotification becomes /sse/SystemNotification
