@@ -21,3 +21,10 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.plugins."funlab_plugin"]
 SSEService = "funlab.sse.service:SSEService"
+
+# SSEService must load at startup: it registers SSE HTTP routes (/sse/<event_type>,
+# /generate_notification) and installs itself as app.notification_provider.
+# Any plugin that sends notifications (e.g. SchedService) depends on this being
+# set before the first request arrives.
+[tool.funlab_plugin_metadata.SSEService]
+load_mode = "startup"

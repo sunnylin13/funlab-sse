@@ -79,8 +79,7 @@ class SSEService(EnhancedServicePlugin, INotificationProvider):
         # the /notifications/* HTTP routes will now delegate to SSEService.
         app.set_notification_provider(self)
         app.mylogger.info(
-            "SSEService activated: replaced PollingNotificationProvider. "
-            "SSE will shutdown when Flask app exits (via plugin lifecycle management)."
+            "SSEService activated: replaced PollingNotificationProvider."
         )
 
     def _teardown(self, _exception):
