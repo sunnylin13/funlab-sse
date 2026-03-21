@@ -1,4 +1,4 @@
-﻿"""
+"""
 SSEService  —  funlab-sse plugin
 
 Install this package and the service activates automatically, replacing
@@ -36,13 +36,13 @@ from flask import (
 )
 from flask_login import current_user, login_required
 from funlab.core.notification import INotificationProvider
-from funlab.core.enhanced_plugin import EnhancedServicePlugin
+from funlab.core.plugin import ServicePlugin
 
 from .manager import EventManager
 from .model import EventBase, EventEntity, EventPriority, SystemNotificationEvent
 
 
-class SSEService(EnhancedServicePlugin, INotificationProvider):
+class SSEService(ServicePlugin, INotificationProvider):
     """SSE plugin that can act as a drop-in replacement for funlab-flaskr's
     built-in SSE implementation."""
 
@@ -68,7 +68,7 @@ class SSEService(EnhancedServicePlugin, INotificationProvider):
         # IMPORTANT: SSE is a daemon service that should persist across ALL requests.
         # We DO NOT register teardown_appcontext() here, as that would shutdown
         # the service after every single request.
-        # Instead, SSE is properly shut down via unload() → stop() → _on_stop()
+        # Instead, SSE is properly shut down via unload() -> stop() -> _on_stop()
         # when the Flask app itself shuts down (managed by plugin_manager.cleanup()).
 
         # Register this service as the app's notification provider.
@@ -89,7 +89,7 @@ class SSEService(EnhancedServicePlugin, INotificationProvider):
         We do NOT shut down the EventManager here because it's a daemon service
         that should persist across multiple requests.
 
-        The proper shutdown happens via unload() → stop() → _on_stop() when
+        The proper shutdown happens via unload() -> stop() -> _on_stop() when
         the plugin manager cleans up at Flask application shutdown.
         """
         pass  # Do NOT shutdown SSE here - this is per-request cleanup only
@@ -199,7 +199,7 @@ class SSEService(EnhancedServicePlugin, INotificationProvider):
                 event = event_cls.from_entity(entity)
                 if event:
                     d = event.to_dict()
-                    d['is_recovered'] = True  # delivered via poll ≠ fresh SSE push
+                    d['is_recovered'] = True  # delivered via poll; not a fresh SSE push
                     result.append(d)
             return result
 
@@ -245,9 +245,14 @@ class SSEService(EnhancedServicePlugin, INotificationProvider):
             self.sse_mgr = None
             self.app.mylogger.info(f"{self.name}: _on_stop() complete")
 
-    def reload(self):
-        """Reload service configuration (no-op for SSE)."""
-        pass
+    def _on_reload(self):
+        """Reload SSE service configuration and rebuild runtime manager.
+
+        Keep route registration unchanged (Blueprint is immutable after registration).
+        """
+        super()._on_reload()
+        self.sse_mgr = EventManager(self.app.dbmgr)
+        self.app.set_notification_provider(self)
 
     def unload(self):
         """Called by plugin manager when the Flask app shuts down.
