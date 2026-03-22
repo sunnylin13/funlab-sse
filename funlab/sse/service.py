@@ -225,6 +225,35 @@ class SSEService(ServicePlugin, INotificationProvider):
     def supports_realtime(self) -> bool:
         return True
 
+    @property
+    def metrics(self):
+        base_metrics = super().metrics
+        connection_manager = self.sse_mgr.connection_manager if self.sse_mgr else None
+        if connection_manager is None:
+            base_metrics.update({
+                'connected_users': 0,
+                'connected_streams': 0,
+                'event_queue_size': 0,
+            })
+            return base_metrics
+
+        connected_users = len(connection_manager.user_connections)
+        connected_streams = sum(len(streams) for streams in connection_manager.user_connections.values())
+        event_queue_size = self.sse_mgr.event_queue.qsize() if self.sse_mgr and self.sse_mgr.event_queue else 0
+        base_metrics.update({
+            'connected_users': connected_users,
+            'connected_streams': connected_streams,
+            'event_queue_size': event_queue_size,
+        })
+        return base_metrics
+
+    def _perform_health_check(self) -> bool:
+        if self.sse_mgr is None:
+            return False
+        if getattr(self.app, 'notification_provider', None) is not self:
+            return False
+        return True
+
     # ------------------------------------------------------------------
     # ServicePlugin lifecycle overrides
     # ------------------------------------------------------------------
@@ -232,7 +261,7 @@ class SSEService(ServicePlugin, INotificationProvider):
     def _on_start(self):
         """Called when the plugin is started (via start())."""
         if self.sse_mgr:
-            self.app.mylogger.info(f"{self.name}: _on_start()")
+            self.app.mylogger.debug(f"{self.name}: _on_start()")
 
     def _on_stop(self):
         """Called when the plugin is stopped (via stop()).
@@ -240,10 +269,10 @@ class SSEService(ServicePlugin, INotificationProvider):
         Gracefully shuts down all SSE resources.
         """
         if self.sse_mgr:
-            self.app.mylogger.info(f"{self.name}: _on_stop() - shutting down EventManager")
+            self.app.mylogger.debug(f"{self.name}: _on_stop() - shutting down EventManager")
             self.sse_mgr.shutdown()
             self.sse_mgr = None
-            self.app.mylogger.info(f"{self.name}: _on_stop() complete")
+            self.app.mylogger.debug(f"{self.name}: _on_stop() complete")
 
     def _on_reload(self):
         """Reload SSE service configuration and rebuild runtime manager.
@@ -260,9 +289,9 @@ class SSEService(ServicePlugin, INotificationProvider):
         Delegates to stop() so the full Enhanced lifecycle is honoured,
         ensuring _on_stop() / EventManager.shutdown() runs exactly once.
         """
-        self.app.mylogger.info(f"{self.name}: unload() - plugin shutdown initiated")
+        self.app.mylogger.debug(f"{self.name}: unload() - plugin shutdown initiated")
         self.stop()
-        self.app.mylogger.info(f"{self.name}: unload() complete")
+        self.app.mylogger.debug(f"{self.name}: unload() complete")
 
     # ------------------------------------------------------------------
     # Route registration (INotificationProvider.register_routes implementation)
@@ -274,7 +303,7 @@ class SSEService(ServicePlugin, INotificationProvider):
         This is called during _setup() to ensure routes are registered before
         the blueprint is registered with Flask.
         """
-        # self.app.mylogger.info(f"[SSEService] Registering SSE routes on own blueprint: {self.blueprint.name}")
+        # self.app.mylogger.debug(f"[SSEService] Registering SSE routes on own blueprint: {self.blueprint.name}")
 
         # Register on own blueprint (sse_bp), which has url_prefix='/sse'
         # So /SystemNotification becomes /sse/SystemNotification
