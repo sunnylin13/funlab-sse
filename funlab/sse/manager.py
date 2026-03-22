@@ -447,12 +447,6 @@ class EventManager:
             return
         self.is_shutting_down = True
 
-        import traceback
-        caller_stack = ''.join(traceback.format_stack()[-5:-1])
-        self.mylogger.info(
-            f"[SHUTDOWN] EventManager.shutdown() called from:\n{caller_stack}"
-        )
-
         self.mylogger.info("Shutting down SSE EventManager...")
         queued_events = self.event_queue.qsize()
         self.mylogger.info(f"  Queued events to persist: {queued_events}")
