@@ -34,9 +34,10 @@ from flask import (
     Response,
     stream_with_context,
 )
-from flask_login import current_user, login_required
+from flask_login import current_user
 from funlab.core.notification import INotificationProvider
 from funlab.core.plugin import ServicePlugin
+from funlab.core.policy import is_authenticated_user
 
 from .manager import EventManager
 from .model import EventBase, EventEntity, EventPriority, SystemNotificationEvent
@@ -45,6 +46,8 @@ from .model import EventBase, EventEntity, EventPriority, SystemNotificationEven
 class SSEService(ServicePlugin, INotificationProvider):
     """SSE plugin that can act as a drop-in replacement for funlab-flaskr's
     built-in SSE implementation."""
+
+    default_route_policy = is_authenticated_user
 
     def __init__(self, app):
         super().__init__(app)
@@ -308,7 +311,6 @@ class SSEService(ServicePlugin, INotificationProvider):
         # Register on own blueprint (sse_bp), which has url_prefix='/sse'
         # So /SystemNotification becomes /sse/SystemNotification
         @self.blueprint.route('/<event_type>')
-        @login_required
         def stream_events(event_type):
             user_id = current_user.id
             stream_id = self.sse_mgr.register_user_stream(user_id, event_type)

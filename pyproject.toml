@@ -28,3 +28,4 @@ SSEService = "funlab.sse.service:SSEService"
 # set before the first request arrives.
 [tool.funlab_plugin_metadata.SSEService]
 load_mode = "startup"
+security_mode = "required"
