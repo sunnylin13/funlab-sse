@@ -127,6 +127,12 @@ class SSEService(ServicePlugin, INotificationProvider):
 
         Returns True if the event was enqueued for the online user, False otherwise.
         """
+        if self.sse_mgr is None:
+            self.app.mylogger.warning(
+                f"SSEService.send_event ignored: sse_mgr is not running "
+                f"(event_type={event_type!r}, target_userid={target_userid})"
+            )
+            return False
         return self.sse_mgr.send_raw_event(
             event_type=event_type,
             target_userid=target_userid,
@@ -143,6 +149,12 @@ class SSEService(ServicePlugin, INotificationProvider):
         expire_after: int = None,
     ) -> EventBase | None:
         """Send a SystemNotification event to *target_userid* (persisted to DB)."""
+        if self.sse_mgr is None:
+            self.app.mylogger.warning(
+                f"SSEService.send_user_notification ignored: sse_mgr is not running "
+                f"(title={title!r}, target_userid={target_userid})"
+            )
+            return None
         return self.sse_mgr.create_event(
             event_type='SystemNotification',
             target_userid=target_userid,
@@ -160,6 +172,12 @@ class SSEService(ServicePlugin, INotificationProvider):
         expire_after: int = None,
     ):
         """Broadcast a SystemNotification event to all currently-connected users."""
+        if self.sse_mgr is None:
+            self.app.mylogger.warning(
+                f"SSEService.send_global_notification ignored: sse_mgr is not running "
+                f"(title={title!r})"
+            )
+            return
         online_users = self.sse_mgr.connection_manager.get_eventtype_users('SystemNotification')
         for uid in online_users:
             self.sse_mgr.create_event(
