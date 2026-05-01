@@ -1,70 +1,32 @@
 # funlab-sse
 
-Server-Sent Events (SSE) plugin for the Funlab Flask ecosystem.
+Server-Sent Events (SSE) 模組，提供即時事件推播至前端瀏覽器。
 
-## Language / 語言
+## 持久化策略
 
-- English guide: [docs/sse-plugin-development-guide.en.md](docs/sse-plugin-development-guide.en.md)
-- Consumer guide (English): [docs/sse-plugin-consumer-guide.en.md](docs/sse-plugin-consumer-guide.en.md)
-- 正體中文指引：[docs/sse-plugin-development-guide.zh-TW.md](docs/sse-plugin-development-guide.zh-TW.md)
-- 使用者視角指引（正體中文）：[docs/sse-plugin-consumer-guide.zh-TW.md](docs/sse-plugin-consumer-guide.zh-TW.md)
+**決議**：SSE 事件不持久化（無 DB 儲存）。
 
----
+理由：
+- SSE 為即時通知，歷史回放需求低。
+- 持久化增加複雜度，且前端斷線重連時可透過 Last-Event-ID 補發近期事件。
+- 近期事件（最後 N 筆）保留於記憶體環形緩衝區，容量由 SSE_BUFFER_SIZE 控制（預設 100）。
 
-## English
+### 斷線重連策略
 
-### What this plugin provides
-- Real-time event streaming via `GET /sse/<event_type>`.
-- Notification-provider integration with root routes:
-	- `GET /notifications/poll`
-	- `POST /notifications/clear`
-	- `POST /notifications/dismiss`
-- Persistent event recovery through database-backed `EventEntity`.
+1. 客戶端以 Last-Event-ID 標頭重連。
+2. 伺服器端從環形緩衝區補發 Last-Event-ID 之後的事件。
+3. 緩衝區中已不存在的事件不補發（客戶端需自行處理遺漏）。
 
-### Project structure (core)
-- `funlab/sse/service.py`: Plugin service and provider integration.
-- `funlab/sse/manager.py`: Event queue, distribution, recovery, cleanup.
-- `funlab/sse/model.py`: Event models and persistence entity.
+## 事件分類
 
-### Development best practices
-1. Implement new features on the active path (`service.py` / `manager.py` / `model.py`).
-2. Avoid hard ORM coupling to other plugin tables.
-3. Apply schema changes through migration workflows (not runtime cross-plugin imports).
-4. Keep `INotificationProvider` behavior stable for compatibility.
-5. Prefer explicit logging for stream and delivery failures.
+| 事件類型 | 說明 |
+|---|---|
+| 
+otification | 系統通知（任務完成、錯誤警告等） |
+| quote_update | 行情更新（即時報價） |
+| order_update | 委託/成交更新 |
 
-### Setup
-```bash
-cd funlab-sse
-poetry install
-```
+## 待實作（Wave 3）
 
----
-
-## 正體中文
-
-### 插件功能
-- 透過 `GET /sse/<event_type>` 提供即時事件推送。
-- 與 root notification 路由整合：
-	- `GET /notifications/poll`
-	- `POST /notifications/clear`
-	- `POST /notifications/dismiss`
-- 以資料庫 `EventEntity` 支援未讀事件回補與狀態維護。
-
-### 核心目錄
-- `funlab/sse/service.py`：插件服務與通知提供者整合。
-- `funlab/sse/manager.py`：事件佇列、分派、回補、清理。
-- `funlab/sse/model.py`：事件模型與持久化實體。
-
-### 開發最佳實踐
-1. 新功能僅修改正式路徑（`service.py` / `manager.py` / `model.py`）。
-2. 避免在 ORM 層對其他 plugin table 建立強耦合。
-3. 資料表結構演進應走 migration 流程，不在 runtime 透過跨 plugin 匯入硬解。
-4. 維持 `INotificationProvider` 介面行為相容。
-5. 對串流與投遞失敗提供可追蹤日誌。
-
-### 安裝
-```bash
-cd funlab-sse
-poetry install
-```
+- T-sse-002：斷線處理測試（Last-Event-ID 補發）
+- T-sse-003：PluginManager 對齊（依賴 T-libs-003，已完成）
