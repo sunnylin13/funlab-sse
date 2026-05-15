@@ -7,7 +7,7 @@ readme = "README.md"
 packages = [{include = "funlab"}]
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = "^3.13"
 funlab-libs = {path = "../funlab-libs", develop = true}
 Flask = ">=3.0"
 flask-login = ">=0.6"
