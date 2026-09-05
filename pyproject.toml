@@ -20,21 +20,16 @@ SSEService = "funlab.sse.service:SSEService"
 [dependency-groups]
 dev = ["pytest>=8.3.0,<10"]
 
-# Cross-repo dependencies resolve via the workspace root's [tool.uv.sources];
-# member-level sources are intentionally omitted (each repo is its own git root,
-# so `workspace = true` here would bind to this repo, not the outer workspace).
+[tool.uv.sources]
+funlab-libs = { workspace = true }
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-# PEP 420 namespace package (shared 'funlab' namespace).
 packages = ["funlab"]
 
-# SSEService must load at startup: it registers SSE HTTP routes (/sse/<event_type>,
-# /generate_notification) and installs itself as app.notification_provider.
-# Any plugin that sends notifications (e.g. SchedService) depends on this being
-# set before the first request arrives.
 [tool.funlab_plugin_metadata.SSEService]
 load_mode = "startup"
 security_mode = "required"
