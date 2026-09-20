@@ -369,13 +369,14 @@ class EventManager:
 
     def _start_event_distributor(self) -> threading.Thread:
         def distributor():
+            # Blocking get(timeout=1): sleeps when the queue is empty instead
+            # of busy-waiting on empty(), which pinned a core at 100% CPU.
             while not self.is_shutting_down:
                 try:
-                    while not self.event_queue.empty():
-                        event: EventBase = self.event_queue.get(timeout=1)
-                        if event.is_read or event.is_expired:
-                            continue
-                        self._distribute_event(event)
+                    event: EventBase = self.event_queue.get(timeout=1)
+                    if event.is_read or event.is_expired:
+                        continue
+                    self._distribute_event(event)
                 except queue.Empty:
                     continue
                 except Exception as exc:
