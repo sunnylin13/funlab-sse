@@ -33,14 +33,19 @@ class RawEventMessage:
     """Minimal event wrapper for ephemeral / real-time events (e.g. price ticks)
     that do **not** need DB persistence or a registered EventBase subclass.
 
-    The SSE stream handler only needs ``.event_type`` and ``.to_dict()``,
-    so this lightweight object is fully compatible.
+    必須與 distributor 的欄位契約相容：distributor 會讀
+    ``is_read`` / ``is_expired`` / ``target_userid``（見 _start_event_distributor、
+    _distribute_event）。少了任何一個，事件會在分發時拋 AttributeError 被丢棄。
     """
 
-    __slots__ = ('event_type', '_data')
+    __slots__ = ('event_type', 'target_userid', '_data')
+
+    #: 即時事件永遠視為未讀（無持久化、無已讀追蹤）
+    is_read = False
 
     def __init__(self, event_type: str, target_userid: int, payload: dict, priority: str = 'NORMAL'):
         self.event_type = event_type
+        self.target_userid = target_userid
         self._data = {
             'id': None,
             'event_type': event_type,
@@ -50,6 +55,10 @@ class RawEventMessage:
             'payload': payload,
             'is_recovered': False,
         }
+
+    @property
+    def is_expired(self) -> bool:
+        return False
 
     def to_dict(self) -> dict:
         return self._data
