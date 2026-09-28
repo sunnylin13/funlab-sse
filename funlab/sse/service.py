@@ -8,8 +8,8 @@ Install this package and the service activates automatically, replacing
 
     GET  /sse/<event_type>              SSE streaming endpoint
 
-  （SSE-11：舊 docstring 宣稱的 POST /generate_notification 與 GET /ssetest
-  從未存在於本外掛。測試注入通知請直接在後端呼叫
+  （SSE-11：舊 docstring 曾宣稱的兩個測試／管理路由從未存在於本外掛，
+  已刪除該幻覺描述。測試注入通知請直接在後端呼叫
   ``app.send_user_notification(...)``，見 docs/sse-plugin-development-guide。）
 
   The ``/notifications/*`` routes (poll / clear / dismiss) remain on the
