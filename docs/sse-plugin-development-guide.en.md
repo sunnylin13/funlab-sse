@@ -112,6 +112,11 @@ And handle:
 4. **Keep provider contract stable**: preserve `INotificationProvider` behavior for root routes compatibility.
 5. **Prioritize thread safety**: review lock scopes and shutdown behavior when changing queues/connections.
 6. **Improve observability**: log at least user_id, event_type, and stream_id (when available) for failures.
+7. **No explicit commit inside plugin DB write paths (SSE-06)**: `session_context()`
+   blocks in this plugin **must not call `session.commit()` / `remove_session()`** —
+   the outermost `session_context` owns commit/rollback (funlab-libs LIB-01 depth
+   counting). `flush()` is allowed (obtains DB-assigned ids without committing).
+   See Consumer Guide §4.4 for the consumer-side contract.
 
 ---
 

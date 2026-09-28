@@ -112,6 +112,10 @@ app.send_global_notification(
 4. **保持介面相容**：維持 `INotificationProvider` 行為一致，避免破壞 root routes。
 5. **執行緒安全優先**：修改 queue / connection 結構時，先確認 lock 範圍與關閉流程。
 6. **可觀測性**：錯誤至少記錄 user_id、event_type、stream_id（若有）。
+7. **DB 寫入點禁顯式 commit（SSE-06）**：插件內的 `session_context()` 區塊
+   **不得呼叫 `session.commit()`／`remove_session()`**——提交／回滾由最外層
+   `session_context` 負責（funlab-libs LIB-01 深度計數語意）。`flush()` 可留
+   （取 DB id、不提交）。消費端契約見 Consumer Guide §4.4。
 
 ---
 

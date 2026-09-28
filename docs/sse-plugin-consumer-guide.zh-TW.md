@@ -43,6 +43,27 @@ app.send_global_notification(
 ### 4.3 不要直接依賴內部細節
 建議只透過 app/provider 介面呼叫，不直接耦合 `EventManager` 內部資料結構，避免升級破壞。
 
+### 4.4 【契約·必守】禁止在交易中間發送通知（SSE-06）
+**禁止在 `dbmgr.session_context()` 交易中間呼叫 `send_user_notification` /
+`send_event` / `dismiss_items` / `dismiss_all`；通知一律在外層交易 commit 之後發。**
+
+理由：SSE 的寫入點（`create_event`→`_store_event`、`dismiss_*`）自帶
+`session_context`。funlab-libs LIB-01 修復後巢狀內層不再提前提交外層交易，
+但內層寫入會**併入外層交易**——外層若回滾，通知一併消失；外層若很晚才提交，
+通知延遲送達。正確寫法：
+
+```python
+with dbmgr.session_context():
+    ...帳務寫入...
+    committed_ok = True
+# 交易結束（已提交）後才發通知
+if committed_ok:
+    app.send_user_notification(title=..., message=..., target_userid=...)
+```
+
+背台執行緒（distributor／cleanup）自成執行緒，scoped_session 每執行緒一份，
+不與請求執行緒共享，此路安全，無需額外處理。
+
 ## 5. 你應該怎麼使用（前端）
 
 ### 5.1 連線端點

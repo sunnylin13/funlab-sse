@@ -65,6 +65,21 @@ class RawEventMessage:
 
 
 # ---------------------------------------------------------------------------
+# Stream-closed sentinel (SSE-05)
+# ---------------------------------------------------------------------------
+
+class _StreamClosed:
+    """Sentinel：放進被淘汰連線的 queue，generator 見到即退出。"""
+    __slots__ = ()
+
+    def __repr__(self):            # pragma: no cover
+        return '<STREAM_CLOSED>'
+
+
+STREAM_CLOSED = _StreamClosed()
+
+
+# ---------------------------------------------------------------------------
 # ConnectionManager
 # ---------------------------------------------------------------------------
 
@@ -74,6 +89,11 @@ class ConnectionManager:
     Each connection is identified by a UUID ``stream_id`` and assigned to a
     specific ``event_type``.  Multiple concurrent connections per user
     (e.g. multiple browser tabs) are supported up to ``max_connections_per_user``.
+
+    投遞契約（SSE-04）：stream 只收「自己 event_type」的事件
+    （get_user_streams 過濾）。
+    eviction 時對被淘汰的 queue 放入 STREAM_CLOSED sentinel（SSE-05），
+    讓該連線的 streaming generator 能體面退出（避免幽靈連線續命）。
     """
 
     def __init__(self, max_connections_per_user: int = 10):
@@ -84,6 +104,8 @@ class ConnectionManager:
         self.eventtype_connection_users: Dict[str, Set[int]] = defaultdict(set)
         # stream_id -> connection timestamp
         self.users_connect_time: Dict[str, float] = {}
+        # stream_id -> event_type（SSE-04：投遞時據以過濾）
+        self.stream_event_type: Dict[str, str] = {}
         self._lock = threading.Lock()
 
     def _generate_stream_id(self) -> str:
@@ -98,13 +120,31 @@ class ConnectionManager:
                     user_conns,
                     key=lambda sid: self.users_connect_time.get(sid, 0),
                 )
-                self._remove_connection_locked(user_id, oldest_sid, event_type)
+                evicted_stream = user_conns.get(oldest_sid)
+                self._remove_connection_locked(
+                    user_id, oldest_sid, self.stream_event_type.get(oldest_sid, event_type)
+                )
+                if evicted_stream is not None:
+                    self._signal_close(evicted_stream)   # SSE-05
 
             stream_id = self._generate_stream_id()
             self.user_connections[user_id][stream_id] = stream
+            self.stream_event_type[stream_id] = event_type
             self.users_connect_time[stream_id] = time.time()
             self.eventtype_connection_users[event_type].add(user_id)
             return stream_id
+
+    @staticmethod
+    def _signal_close(stream: queue.Queue):
+        """SSE-05：通知被淘汰連線的 generator 終止（不阻塞、可能滿則先腾一格）。"""
+        try:
+            stream.put_nowait(STREAM_CLOSED)
+        except queue.Full:
+            try:
+                stream.get_nowait()
+                stream.put_nowait(STREAM_CLOSED)
+            except queue.Empty:      # pragma: no cover - race
+                pass
 
     def _remove_connection_locked(self, user_id: int, stream_id: str, event_type: str):
         """Remove one connection; must be called *with* self._lock held."""
@@ -112,9 +152,14 @@ class ConnectionManager:
         if user_conns and stream_id in user_conns:
             del user_conns[stream_id]
         self.users_connect_time.pop(stream_id, None)
+        self.stream_event_type.pop(stream_id, None)
         if not self.user_connections.get(user_id):
             self.user_connections.pop(user_id, None)
-            self.eventtype_connection_users[event_type].discard(user_id)
+            users = self.eventtype_connection_users.get(event_type)
+            if users is not None:
+                users.discard(user_id)
+                if not users:                     # 探針 E：空集合垃圾鍵即時回收
+                    self.eventtype_connection_users.pop(event_type, None)
 
     def remove_connection(self, user_id: int, stream_id: str, event_type: str):
         with self._lock:
@@ -135,12 +180,23 @@ class ConnectionManager:
             del self.user_connections[user_id]
             for sid in stream_ids:
                 self.users_connect_time.pop(sid, None)
-            for event_type in self.eventtype_connection_users:
-                self.eventtype_connection_users[event_type].discard(user_id)
+                self.stream_event_type.pop(sid, None)
+            for event_type in list(self.eventtype_connection_users.keys()):
+                users = self.eventtype_connection_users[event_type]
+                users.discard(user_id)
+                if not users:
+                    self.eventtype_connection_users.pop(event_type, None)
 
-    def get_user_streams(self, user_id: int) -> Set[queue.Queue]:
+    def get_user_streams(self, user_id: int, event_type: str = None) -> Set[queue.Queue]:
+        """回傳使用者連線。給定 event_type 時只回傳訂閱該型別的連線。"""
         with self._lock:
-            return set(self.user_connections.get(user_id, {}).values())
+            conns = self.user_connections.get(user_id, {})
+            if event_type is None:
+                return set(conns.values())
+            return {
+                stream for sid, stream in conns.items()
+                if self.stream_event_type.get(sid) == event_type
+            }
 
     def get_all_streams(self) -> Set[queue.Queue]:
         with self._lock:
@@ -183,7 +239,8 @@ class EventManager:
         self.connection_manager = ConnectionManager()
         self.event_queue: queue.Queue[EventBase] = queue.Queue(maxsize=max_event_queue_size)
         self.max_events_per_stream = max_events_per_stream
-        self.lock = threading.Lock()
+        self.lock = threading.Lock()          # 保留：給未來需要跨物件原子操作的使用
+        self.dropped_event_count = 0          # SSE-01：佇列滿時被丢棄的持久事件累計數（observability）
         self.is_shutting_down = False
         self.mylogger.debug(
             f"EventManager.__init__ starting "
@@ -239,11 +296,10 @@ class EventManager:
 
         # Only enqueue for immediate delivery when the user is online
         if target_userid in self.connection_manager.user_connections:
-            try:
-                self._put_event(event)
-            except queue.Full:
+            if not self._put_event(event):
                 self.mylogger.error(
-                    f"Event queue full  event {event.id} for user {target_userid} dropped!"
+                    f"Event queue full  event {event.id} for user {target_userid} "
+                    f"not enqueued; will recover from DB on next stream."
                 )
                 event = None
         else:
@@ -252,9 +308,23 @@ class EventManager:
             )
         return event
 
-    def _put_event(self, event):
-        with self.lock:
-            self.event_queue.put(event)
+    def _put_event(self, event) -> bool:
+        """SSE-01：非阻塞放入主事件佇列。Queue 本身 thread-safe，不需要外層鎖。
+
+        佇列滿時丢棄並回傳 False（持久化已在 _store_event 完成，
+        使用者上線後仍可經 _recover_user_events 由 DB 回補，不丢資料）。
+        """
+        try:
+            self.event_queue.put_nowait(event)
+            return True
+        except queue.Full:
+            self.dropped_event_count += 1
+            self.mylogger.warning(
+                f"Event queue full; event {getattr(event, 'id', None)} "
+                f"for user {getattr(event, 'target_userid', None)} deferred to DB recovery "
+                f"(dropped_total={self.dropped_event_count})"
+            )
+            return False
 
     def send_raw_event(
         self,
@@ -287,13 +357,15 @@ class EventManager:
 
 
     def _store_event(self, event: EventBase):
+        # SSE-06：不顯式 commit——巢狀語意（funlab-libs LIB-01）下由最外層
+        # session_context 負責 commit；顯式 commit 會把外層未提交交易提前提交。
+        # flush 仍保留：取 DB 端 id（在交易內發出 SQL，不提交）。
         with self.dbmgr.session_context() as session:
             entity = event.to_entity()
             if entity:
                 session.add(entity)
                 session.flush()          # assign DB id before commit
                 event.id = entity.id
-                session.commit()
 
     def set_event_read(self, event: EventBase):
         event.is_read = True
@@ -307,7 +379,10 @@ class EventManager:
     # ------------------------------------------------------------------
 
     def _recover_stored_events(self):
-        """On startup, delete expired and already-read events from the DB."""
+        """On startup, delete expired and already-read events from the DB.
+
+        SSE-06：不自顯式 commit（巢狀安全，見 _store_event 註解）。
+        """
         with self.dbmgr.session_context() as session:
             stmt = select(EventEntity).where(
                 (EventEntity.is_expired == True) | (EventEntity.is_read == True)
@@ -315,8 +390,6 @@ class EventManager:
             stale = session.execute(stmt).scalars().all()
             for entity in stale:
                 session.delete(entity)
-            if stale:
-                session.commit()
 
     def _recover_user_events(self, user_id: int, event_type: str):
         """Push unread DB events for ``user_id`` into their newly opened stream."""
@@ -331,7 +404,8 @@ class EventManager:
                 .order_by(EventEntity.priority.desc(), EventEntity.created_at.asc())
             )
             pending = session.execute(stmt).scalars().all()
-            user_streams = self.connection_manager.get_user_streams(user_id)
+            # SSE-04：只回補該 event_type 的連線（DB 查詢本就按型別，投遞不再跨型別誤送）
+            user_streams = self.connection_manager.get_user_streams(user_id, event_type=event_type)
             recovered = 0
             for entity in pending:
                 try:
@@ -356,7 +430,7 @@ class EventManager:
                     self.mylogger.error(
                         f"Error recovering event {entity.id} for user {user_id}: {exc}"
                     )
-            session.commit()
+            # SSE-06：不顯式 commit（巢狀安全，見 _store_event 註解）
             if recovered:
                 self.mylogger.debug(f"Recovered {recovered} events for user {user_id}.")
 
@@ -365,7 +439,10 @@ class EventManager:
     # ------------------------------------------------------------------
 
     def _distribute_event(self, event: EventBase):
-        streams = self.connection_manager.get_user_streams(event.target_userid)
+        # SSE-04：只投給訂閱該 event_type 的連線
+        streams = self.connection_manager.get_user_streams(
+            event.target_userid, event_type=event.event_type
+        )
         for stream in streams:
             try:
                 if stream.qsize() < self.max_events_per_stream:
@@ -403,6 +480,8 @@ class EventManager:
 
         Bug fix: original code used Python ``or`` which evaluates the WHERE
         clause as a bool (always True).  Corrected to SQLAlchemy bitwise ``|``.
+
+        SSE-06：不顯式 commit（巢狀安全，見 _store_event 註解）。
         """
         with self.dbmgr.session_context() as session:
             stmt = select(EventEntity).where(
@@ -412,16 +491,17 @@ class EventManager:
             to_delete = session.execute(stmt).scalars().all()
             for entity in to_delete:
                 session.delete(entity)
-            session.commit()
 
     def _start_cleanup_scheduler(self, interval_minutes: int = 30) -> threading.Thread:
         def scheduler():
             while not self.is_shutting_down:
                 try:
                     self.clean_up_events()
-                    time.sleep(interval_minutes * 60)
                 except Exception as exc:
                     self.mylogger.error(f"Event cleanup error: {exc}")
+                finally:
+                    # SSE-09：無論好壞都要睡，錯誤時不形成緊迫重試迴圈（同 PR#1 教訓）
+                    time.sleep(interval_minutes * 60)
         t = threading.Thread(name='sse_event_cleanup', target=scheduler, daemon=True)
         t.start()
         return t

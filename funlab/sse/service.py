@@ -39,7 +39,7 @@ from funlab.core.notification import INotificationProvider
 from funlab.core.plugin import ServicePlugin
 from funlab.core.policy import is_authenticated_user
 
-from .manager import EventManager
+from .manager import EventManager, STREAM_CLOSED
 from .model import EventBase, EventEntity, EventPriority, SystemNotificationEvent
 
 
@@ -225,22 +225,26 @@ class SSEService(ServicePlugin, INotificationProvider):
             return result
 
     def dismiss_items(self, user_id: int, item_ids: list[int]) -> None:
-        """Mark specific events as read in the DB for *user_id*."""
+        """Mark specific events as read in the DB for *user_id*.
+
+        SSE-06：不顯式 commit——由 session_context 最外層提交（巢狀安全）。
+        """
         with self.app.dbmgr.session_context() as session:
             session.query(EventEntity).filter(
                 EventEntity.id.in_(item_ids),
                 EventEntity.target_userid == user_id,
             ).update({'is_read': True}, synchronize_session=False)
-            session.commit()
 
     def dismiss_all(self, user_id: int) -> None:
-        """Mark all unread events as read in the DB for *user_id*."""
+        """Mark all unread events as read in the DB for *user_id*.
+
+        SSE-06：不顯式 commit——由 session_context 最外層提交（巢狀安全）。
+        """
         with self.app.dbmgr.session_context() as session:
             session.query(EventEntity).filter(
                 EventEntity.target_userid == user_id,
                 EventEntity.is_read == False,
             ).update({'is_read': True}, synchronize_session=False)
-            session.commit()
 
     @property
     def supports_realtime(self) -> bool:
@@ -265,6 +269,7 @@ class SSEService(ServicePlugin, INotificationProvider):
             'connected_users': connected_users,
             'connected_streams': connected_streams,
             'event_queue_size': event_queue_size,
+            'dropped_event_count': getattr(self.sse_mgr, 'dropped_event_count', 0),  # SSE-01
         })
         return base_metrics
 
@@ -346,7 +351,10 @@ class SSEService(ServicePlugin, INotificationProvider):
                         return
                     while True:
                         try:
-                            event: EventBase = user_stream.get(timeout=10)
+                            event = user_stream.get(timeout=10)
+                            if event is STREAM_CLOSED:
+                                # SSE-05：本連線已被淘汰（超過 max_connections）→ 體面退出
+                                return
                             sse = (
                                 f"event: {event.event_type}\n"
                                 f"data: {json.dumps(event.to_dict())}\n\n"
@@ -361,7 +369,9 @@ class SSEService(ServicePlugin, INotificationProvider):
                         f"SSE stream error user={user_id} stream={stream_id}: {exc}"
                     )
                 finally:
-                    self.sse_mgr.unregister_user_stream(user_id, stream_id, event_type)
+                    mgr = self.sse_mgr
+                    if mgr is not None:                 # SSE-13：shutdown 競態保護
+                        mgr.unregister_user_stream(user_id, stream_id, event_type)
 
             return Response(
                 stream_with_context(event_stream()),

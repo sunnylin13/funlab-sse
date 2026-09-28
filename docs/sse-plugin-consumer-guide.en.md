@@ -43,6 +43,30 @@ app.send_global_notification(
 ### 4.3 Avoid hard internal coupling
 Prefer app/provider interfaces instead of directly depending on internal `EventManager` structures.
 
+### 4.4 [CONTRACT — MUST] Never notify inside an open transaction (SSE-06)
+**Never call `send_user_notification` / `send_event` / `dismiss_items` /
+`dismiss_all` in the middle of a `dbmgr.session_context()` transaction; always
+notify after the outer transaction has committed.**
+
+Why: SSE write paths (`create_event` → `_store_event`, `dismiss_*`) open their
+own `session_context`. After the funlab-libs LIB-01 fix a nested context no
+longer commits/closes the outer transaction early, but nested writes **join
+the outer transaction** — an outer rollback discards the notification, and a
+late outer commit delays delivery. Correct pattern:
+
+```python
+with dbmgr.session_context():
+    ...accounting writes...
+    committed_ok = True
+# notify only after the transaction has committed
+if committed_ok:
+    app.send_user_notification(title=..., message=..., target_userid=...)
+```
+
+Background threads (distributor/cleanup) run on their own threads with a
+per-thread scoped_session and never share a request session — that path is
+safe and needs no extra handling.
+
 ## 5. Frontend usage
 
 ### 5.1 Stream endpoint
