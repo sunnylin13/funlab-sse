@@ -7,8 +7,10 @@ Install this package and the service activates automatically, replacing
   Routes registered by this plugin:
 
     GET  /sse/<event_type>              SSE streaming endpoint
-    POST /generate_notification         Test / programmatic event injection
-    GET  /ssetest                       (Admin) SSE test page
+
+  （SSE-11：舊 docstring 宣稱的 POST /generate_notification 與 GET /ssetest
+  從未存在於本外掛。測試注入通知請直接在後端呼叫
+  ``app.send_user_notification(...)``，見 docs/sse-plugin-development-guide。）
 
   The ``/notifications/*`` routes (poll / clear / dismiss) remain on the
   root blueprint registered by funlab-flaskr and automatically delegate to
@@ -85,6 +87,37 @@ class SSEService(ServicePlugin, INotificationProvider):
             "SSEService activated: replaced PollingNotificationProvider."
         )
 
+        # SSE-10◆Q6：多 worker 護欄（只警示、不影響啟動）
+        self._warn_if_multiworker(app)
+
+    @staticmethod
+    def _warn_if_multiworker(app) -> None:
+        """SSE-10◆Q6：WSGI 多 worker 啟動護欄。
+
+        SSE 的連線表是 per-process in-memory；只有單進程部署正確。
+        PM 裁示（2026-09-28）正式環境續用 waitress（單進程）滿足前提。
+        若切 gunicorn 且 gunicorn_conf.workers>1，事件只送達「恰好同 worker」
+        的連線——即時性靜默失效，故於啟動時明語警示。
+        護欄自身 try/except 包死，不可影響啟動。
+        """
+        try:
+            wsgi = str(app.config.get('WSGI', 'flask')).lower()
+            if wsgi == 'gunicorn':
+                from funlab.flaskr.conf import gunicorn_conf
+                import multiprocessing
+                workers = getattr(gunicorn_conf, 'workers', 1) or 1
+                if workers < 1:
+                    workers = multiprocessing.cpu_count() * 2 + 1
+                if workers > 1:
+                    app.mylogger.warning(
+                        f"SSEService: 偵測到 WSGI=gunicorn 且 workers={workers}。"
+                        "SSE 連線表為 per-process in-memory，多 worker 下即時推送會靜默漏送"
+                        "（僅剩 /notifications/poll 回補）。請改單 worker（waitress 或 "
+                        "gunicorn -w 1 --threads N）或實作跨進程廣播後再切換。"
+                    )
+        except Exception as guard_exc:   # 護欄本身不可影響啟動
+            app.mylogger.debug(f"SSE multi-worker guard skipped: {guard_exc}")
+
     def _teardown(self, _exception):
         """Teardown callback invoked by Flask at the end of request context.
 
@@ -144,11 +177,23 @@ class SSEService(ServicePlugin, INotificationProvider):
         self,
         title: str,
         message: str,
-        target_userid: int = None,
+        target_userid: int,
         priority: 'str | EventPriority' = 'NORMAL',
         expire_after: int = None,
     ) -> EventBase | None:
-        """Send a SystemNotification event to *target_userid* (persisted to DB)."""
+        """Send a SystemNotification event to *target_userid* (persisted to DB).
+
+        SSE-12◆Q7（PM 裁示 2026-09-28）：``target_userid`` 為必填——None 於入口
+        顯式拒絕（guard log＋回傳 None，不寫孤列、不廣播）。要廣播請改用
+        :meth:`send_global_notification`。funlab-libs 介面文件舊述
+        「None＝全域」已過時，待 libs 側同步更正。
+        """
+        if target_userid is None:
+            self.app.mylogger.warning(
+                f"SSEService.send_user_notification REJECTED: target_userid 必填，"
+                f"拒絕寫入 None 孤列 (title={title!r})；廣播請用 send_global_notification"
+            )
+            return None
         if self.sse_mgr is None:
             self.app.mylogger.warning(
                 f"SSEService.send_user_notification ignored: sse_mgr is not running "

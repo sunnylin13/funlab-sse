@@ -5,7 +5,8 @@
 class SSEClient {
     constructor(options = {}) {
         this.options = {
-            reconnectTimeout: 5000,
+            reconnectTimeout: 1000,      // SSE-14：退避基準（含上限）
+            maxReconnectTimeout: 60000,
             heartbeatInterval: 30000,
             debug: false,
             ...options
@@ -13,6 +14,9 @@ class SSEClient {
         this.eventSources = {};
         this.connected = false;
         this.renderFunctions = {};
+        this._retryCounts = {};          // eventType -> 連續失敗次數
+        this._reconnectTimers = {};      // eventType -> timer id
+        this._unloadHandlers = {};       // eventType -> bound handler
     }
 
     /**
@@ -37,6 +41,7 @@ class SSEClient {
         // Set up event handlers
         eventSource.onopen = () => {
             this.connected = true;
+            this._retryCounts[eventType] = 0;      // SSE-14：連上即歸零退避
             if (this.options.debug) {
                 console.log(`Connection to ${eventType} opened`);
             }
@@ -65,24 +70,30 @@ class SSEClient {
             }
         });
 
-        // Error handling with reconnection
+        // SSE-14 重連策略：CLOSED（終端態，如 HTTP 4xx/5xx）才手動指數退避；
+        // CONNECTING 態交給 EventSource 原生重試，避免雙重連線競態。
         eventSource.onerror = (error) => {
-            console.error(`SSE connection error for ${eventType}:`, error);
-
+            console.warn(`SSE connection error for ${eventType}:`, error);
             if (eventSource.readyState === EventSource.CLOSED) {
                 this.connected = false;
-                console.log(`Connection closed for ${eventType}, attempting to reconnect...`);
-
-                setTimeout(() => {
+                const attempt = (this._retryCounts[eventType] || 0) + 1;
+                this._retryCounts[eventType] = attempt;
+                const delay = Math.min(
+                    this.options.reconnectTimeout * Math.pow(2, attempt - 1),
+                    this.options.maxReconnectTimeout
+                ) * (0.5 + Math.random());        // jitter 0.5x–1.5x
+                console.log(`Reconnecting ${eventType} in ${Math.round(delay)}ms (attempt ${attempt})`);
+                clearTimeout(this._reconnectTimers[eventType]);
+                this._reconnectTimers[eventType] = setTimeout(() => {
                     this.subscribe(eventType, renderFunction, endpoint);
-                }, this.options.reconnectTimeout);
+                }, delay);
             }
         };
 
-        // Clean up on page unload
-        window.addEventListener('beforeunload', () => {
-            this.unsubscribe(eventType);
-        });
+        // SSE-14：每個 eventType 只掛一次卸載監聽器，unsubscribe 時移除
+        const unloadHandler = () => this.unsubscribe(eventType);
+        this._unloadHandlers[eventType] = unloadHandler;
+        window.addEventListener('beforeunload', unloadHandler);
 
         return eventSource;
     }
@@ -92,6 +103,12 @@ class SSEClient {
      * @param {string} eventType - Type of event to unsubscribe from
      */
     unsubscribe(eventType) {
+        clearTimeout(this._reconnectTimers[eventType]);
+        delete this._reconnectTimers[eventType];
+        if (this._unloadHandlers[eventType]) {
+            window.removeEventListener('beforeunload', this._unloadHandlers[eventType]);
+            delete this._unloadHandlers[eventType];
+        }
         if (this.eventSources[eventType]) {
             this.eventSources[eventType].close();
             delete this.eventSources[eventType];
@@ -99,29 +116,6 @@ class SSEClient {
                 console.log(`Unsubscribed from ${eventType}`);
             }
         }
-    }
-
-    /**
-     * Send a notification via POST request
-     * @param {string} title - Notification title
-     * @param {string} message - Notification message
-     * @param {string} endpoint - API endpoint
-     * @returns {Promise} - Promise resolving to response data
-     */
-    sendNotification(title, message, endpoint = '/generate_notification') {
-        const formData = new FormData();
-        formData.append('title', title);
-        formData.append('message', message);
-
-        return fetch(endpoint, {
-            method: 'POST',
-            body: formData
-        })
-        .then(response => response.json())
-        .catch(error => {
-            console.error('Error sending notification:', error);
-            throw error;
-        });
     }
 
     /**
@@ -216,4 +210,6 @@ class SSEClient {
 }
 
 // Global instance - exposed to window for use by other scripts
-window.sseClient = new SSEClient({ debug: true });
+// SSE-14：正式環境預設靜音；需要除錯時控制台執行
+//   window.sseClient.options.debug = true
+window.sseClient = new SSEClient({ debug: false });

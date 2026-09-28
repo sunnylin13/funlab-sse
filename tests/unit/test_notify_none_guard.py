@@ -1,12 +1,14 @@
-"""Q7 未裁示的 guard 附註測試：send_user_notification(target_userid=None)
+"""SSE-12◆Q7 裁示落地：send_user_notification(target_userid=None) 顯式拒絕。
 
-Q7（介面說廣播、實作寫入 None 孤列）尚未裁示。本卡紅線：**不改 None 語意**，
-只做誠實化附註——以下測試把「現行 None 行為」釘成回歸契約：
-None 仍原樣委派 create_event（寫 DB 孤列、不廣播、不丟例外、不拒寫）。
-未來 Q7 裁示要改語意（必填＋guard 或真廣播）時，必須刻意改寫本測試。
+本檔原本是「Q7 未裁示」的回歸凍結測試（釘住 None→create_event 寫孤列舊行為）。
+PM 書面裁示（2026-09-28，C5 卡 t_ec356272）：Q7＝**參數必填＋guard**——
+呼叫端不再傳 None，函式入口對 None 顯式拒絕（guard log＋回傳 None，
+不寫孤列、不廣播）。依原檔自述的約定，本次為刻意改寫。
 """
 import logging
 from unittest.mock import MagicMock
+
+import pytest
 
 from funlab.sse.service import SSEService
 
@@ -21,19 +23,26 @@ def _bare_service():
     return svc
 
 
-class TestNoneTargetSemanticsFrozen:
-    def test_none_target_still_delegates_to_create_event(self):
+class TestNoneTargetRejected:
+    def test_none_target_rejected_without_db_write(self, caplog):
         svc = _bare_service()
-        result = svc.send_user_notification('t', 'm', target_userid=None)
-        kwargs = svc.sse_mgr.create_event.call_args.kwargs
-        assert kwargs['target_userid'] is None
-        assert result is not None          # 語意不變：照常回傳事件物件
+        with caplog.at_level(logging.WARNING, logger='t'):
+            result = svc.send_user_notification('t', 'm', target_userid=None)
+        assert result is None
+        svc.sse_mgr.create_event.assert_not_called()   # 不寫孤列
+        assert any('REJECTED' in r.message for r in caplog.records)  # guard log
 
     def test_int_target_delegates_unchanged(self):
         svc = _bare_service()
         svc.send_user_notification('t', 'm', target_userid=5)
         kwargs = svc.sse_mgr.create_event.call_args.kwargs
         assert kwargs['target_userid'] == 5
+
+    def test_target_userid_positional_required(self):
+        # Q7 必填語意：未傳 target_userid → TypeError（簽名層面鎖定）
+        svc = _bare_service()
+        with pytest.raises(TypeError):
+            svc.send_user_notification('t', 'm')
 
     def test_sse_mgr_none_returns_none_honestly(self):
         svc = _bare_service()

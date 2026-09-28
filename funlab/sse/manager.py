@@ -270,22 +270,26 @@ class EventManager:
     # Event creation
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _expiry_from_now(expire_after: int | None):
+        """SSE-08：expire_after 單位＝秒（契約見 funlab-libs notification.py）。None＝永不過期。"""
+        if not expire_after or expire_after <= 0:
+            return None
+        return datetime.now(timezone.utc) + timedelta(seconds=expire_after)
+
     def create_event(
         self,
         event_type: str,
         target_userid: int,
         priority: EventPriority = EventPriority.NORMAL,
-        expire_after: int = None,           # minutes
+        expire_after: int = None,           # seconds（SSE-08：介面語意為秒）
         **payload_kwargs,
     ) -> EventBase:
         event_class = self._event_classes.get(event_type)
         if not event_class:
             raise ValueError(f"Unregistered event type: {event_type!r}")
 
-        expired_at = (
-            datetime.now(timezone.utc) + timedelta(minutes=expire_after)
-            if expire_after else None
-        )
+        expired_at = self._expiry_from_now(expire_after)
         event = event_class(
             target_userid=target_userid,
             priority=priority,
@@ -476,20 +480,33 @@ class EventManager:
     # ------------------------------------------------------------------
 
     def clean_up_events(self):
-        """Delete read or expired events from the DB.
+        """Delete read / expired / orphaned events from the DB.
 
-        Bug fix: original code used Python ``or`` which evaluates the WHERE
-        clause as a bool (always True).  Corrected to SQLAlchemy bitwise ``|``.
+        SSE-12：orphaned = event_type 已不在註冊表（插件被移除），
+        且無過期時間可託管——不清理會永遠累積。
 
-        SSE-06：不顯式 commit（巢狀安全，見 _store_event 註解）。
+        Bug fix（沿革）：原程式用 Python ``or`` 使 WHERE 恆真，已改 SQLAlchemy ``|``。
+        SSE-06：不顯式 commit（巢狀安全，見 _store_event 註解）——由
+        session_context 最外層提交。
         """
+        known_types = set(self._event_classes.keys())
         with self.dbmgr.session_context() as session:
             stmt = select(EventEntity).where(
                 (EventEntity.is_read == True)
                 | (EventEntity.expired_at <= datetime.now(timezone.utc))
             )
-            to_delete = session.execute(stmt).scalars().all()
+            to_delete = list(session.execute(stmt).scalars().all())
+            if known_types:
+                # 保護極早啟動窗口：註冊表為空時跳過孤兒清理，寧可不删
+                orphan_stmt = select(EventEntity).where(
+                    EventEntity.event_type.notin_(known_types)
+                )
+                to_delete.extend(session.execute(orphan_stmt).scalars().all())
+            seen = set()
             for entity in to_delete:
+                if entity.id in seen:
+                    continue
+                seen.add(entity.id)
                 session.delete(entity)
 
     def _start_cleanup_scheduler(self, interval_minutes: int = 30) -> threading.Thread:
