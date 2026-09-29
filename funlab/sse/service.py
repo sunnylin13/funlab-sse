@@ -49,7 +49,7 @@ class SSEService(ServicePlugin, INotificationProvider):
     """SSE plugin that can act as a drop-in replacement for funlab-flaskr's
     built-in SSE implementation."""
 
-    default_route_policy = is_authenticated_user
+    default_route_policy = staticmethod(is_authenticated_user)
 
     def __init__(self, app):
         super().__init__(app)
