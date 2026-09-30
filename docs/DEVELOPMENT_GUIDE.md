@@ -100,7 +100,7 @@ window.sseClient.subscribe('OrderFilled', (data) => { /* data.payload.symbol ...
 ## 5. 測試
 
 - 現況：`tests/unit/test_sse_disconnect.py` 14 筆（純 ConnectionManager，`conftest.py` stub 掉 `APP_ENTITIES_REGISTRY`）。
-- 跑法：`cd funlab-sse && source ~/.venv/fund13/bin/activate && python -m pytest -q`。
+- 跑法：`cd funlab-sse && source ~/workspaces/fund13/.venv/bin/activate && python -m pytest -q`。
 - 方向（IMPROVEMENT_PLAN 各條已附可貼測試）：`_put_event` 非阻塞、RawEventMessage 契約、event_type 投遞過濾、expire 單位、cleanup 錯誤退避、孤兒清理；集成層（tmp sqlite DbMgr）測 `clean_up_events` 與回補。
 - 手動端到端（QA）：登入 → `curl -N -b <cookie> http://localhost:5000/sse/SystemNotification` ＋另一終端觸發通知；關頁再送、重開看回補；dismiss 後 poll 為空。
 

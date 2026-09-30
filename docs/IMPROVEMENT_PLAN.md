@@ -160,7 +160,7 @@ class TestPutEventNonBlocking:
         assert em.dropped_event_count == 1
 ```
 
-- **驗證指令與預期**：`cd funlab-sse && source ~/.venv/fund13/bin/activate && python -m pytest -q` → 原 14 筆＋新 3 筆全過；探針 `sse_probes.py` 重跑後 `C_put_blocks=false`。
+- **驗證指令與預期**：`cd funlab-sse && source ~/workspaces/fund13/.venv/bin/activate && python -m pytest -q` → 原 14 筆＋新 3 筆全過；探針 `sse_probes.py` 重跑後 `C_put_blocks=false`。
 - **風險**：低。行為變更＝「佇列滿從卡死改為丢佇列留 DB」；事件仍有 DB 持久化＋重連回補兜底，語意嚴格更安全。`dropped_event_count` 建議順帶併入 `service.py:metrics`。
 
 ## SSE-02【P0】跨倉整合錯誤：finfun-quotesvcs 誤用 `app.sse_service`（證據包 L14）
