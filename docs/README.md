@@ -6,7 +6,7 @@
 |---|---|
 | [CONSUMER_GUIDE.md](CONSUMER_GUIDE.md) | **消費端**：如何發通知／推即時事件／前端訂閱／回補與已讀契約 |
 | [DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md) | **開發端**：模組架構、自訂持久事件、生命週期、測試 |
-| KB `specs/migrations/funlab-sse-IMPROVEMENT_PLAN.md`（2026-10-10 遷 KB） | 待辦改善項 SSE-01…SSE-14（含完整修正程式碼與測試）；給 fund13-dev-coder |
+| KB `dev/migrations/funlab-sse-IMPROVEMENT_PLAN.md`（2026-10-10 遷 KB） | 待辦改善項 SSE-01…SSE-14（含完整修正程式碼與測試）；給 fund13-dev-coder |
 
 ## 快速事實卡
 
